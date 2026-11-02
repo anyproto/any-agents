@@ -6,7 +6,7 @@
 //
 //	ANY_AGENTS_E2E=1 go test ./e2e -v -count=1 -timeout 20m
 //
-// ANY_AGENTS_ADDR picks the server (default 127.0.0.1:7001).
+// ANY_AGENTS_ADDR picks the server (default 127.0.0.1:2046).
 //
 // Isolation: every run builds the binary into a temp dir and points HOME,
 // ANY_AGENTS_HOME (bridge state, sync fingerprints, stats, the installed
@@ -88,7 +88,7 @@ func mainRun(m *testing.M) (code int) {
 	flag.Parse()
 	addr = os.Getenv("ANY_AGENTS_ADDR")
 	if addr == "" {
-		addr = "127.0.0.1:7001"
+		addr = "127.0.0.1:2046"
 	}
 	fail := func(format string, a ...any) int {
 		fmt.Fprintf(os.Stderr, "e2e setup: "+format+"\n", a...)

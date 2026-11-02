@@ -45,7 +45,7 @@ Per machine:
 
 ```
 any init --mnemonic        # same phrase on every machine; NEVER copy wallet.key
-any run                    # local any server on 127.0.0.1:7001
+any run                    # local any server, 127.0.0.1:2046 by default
 make build && ./bin/any-agents install
 ```
 
@@ -62,8 +62,11 @@ joined (a writer installs the bundles, a reader adopts them). Invites
 go through `any invite create <spaceId>` and `any join --token …`.
 
 The Collab bundle needs an any server that lets a client type declare
-the chat module; on an older server `install` says so and every other
-feature works.
+the chat module (anyproto/any#310, in main since 2026-10-27). On an
+older server `install` cannot register it; when another member already
+did, the bundle is adopted through a registry read, so that machine can
+join and talk in collabs but not open one, and nothing in the space is
+parked or lost (see docs/design.md § Mixed server versions).
 
 ## Session lifecycle
 
@@ -135,7 +138,7 @@ Aliases: `save` = `doc add`, `prompt …` = `task …`, `scratch append|show`
 link names its space. Listings print `any://o/<space>/<id>` links that
 open in any-ui.
 
-Env: `ANY_AGENTS_ADDR` (`127.0.0.1:7001`), `ANY_AGENTS_SPACE` (`Agents`,
+Env: `ANY_AGENTS_ADDR` (`127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
 the private space name), `ANY_AGENTS_RAG_MIN` (`0.030`), `ANY_AGENTS_TOOL`
 (`claude`), `ANY_AGENTS_HOME` (`~/.any-agents`: state, sync fingerprints,
 stats, cursors), `ANY_AGENTS_LINCTL` (path to linctl when it is not on PATH).
@@ -211,3 +214,7 @@ ANY_AGENTS_E2E=1 go test ./e2e -v   # drives the binary against a live server in
 
 Run the e2e against a test account on a local network, never against
 the account that holds your data.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
