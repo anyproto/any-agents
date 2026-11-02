@@ -1,0 +1,5 @@
+[
+  {"query": "why does the second device only converge every thirty seconds", "expect": ["myrepo:realtime-sync-needs-distinct-peer-ids"]},
+  {"query": "how do I run the end-to-end suite against the local network", "expect": ["myrepo:e2e-local-network"]},
+  {"query": "what is the weather like today", "expect": []}
+]
