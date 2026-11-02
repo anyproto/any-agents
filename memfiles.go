@@ -233,7 +233,7 @@ func renderMemoryIndex(items []*MemItem, files map[string]string, shared []Share
 		if len(ss.Items) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "\n## Shared by %s (read-only; `any-agents memory share` publishes)\n\n", ss.Space)
+		fmt.Fprintf(&b, "\n## Shared by %s (your own entries are editable and sync on push; other members' are read-only)\n\n", ss.Space)
 		sorted := append([]*MemItem(nil), ss.Items...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Slug < sorted[j].Slug })
 		for _, m := range sorted {

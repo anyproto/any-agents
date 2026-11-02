@@ -7,13 +7,17 @@
 //	ANY_AGENTS_E2E=1 go test ./e2e -v -count=1 -timeout 20m
 //
 // ANY_AGENTS_ADDR picks the server (default 127.0.0.1:2046).
+// ANY_AGENTS_ADDR_B names a second server on the same network, logged into
+// another account: it joins the collab space as a member for the shared
+// memory checks, which are skipped when it is unset.
 //
 // Isolation: every run builds the binary into a temp dir and points HOME,
 // ANY_AGENTS_HOME (bridge state, sync fingerprints, stats, the installed
 // binary) and CLAUDE_CONFIG_DIR (settings.json, config files, memory dirs)
 // at a sandbox. The private space and the collab space carry a name unique
-// to the run; cleanup deletes exactly those, also when a test fails, panics,
-// times out or the run is interrupted.
+// to the run (the member's private space too); cleanup deletes exactly
+// those on each server, also when a test fails, panics, times out or the
+// run is interrupted.
 package e2e
 
 import (
@@ -66,6 +70,8 @@ var (
 	identity  string
 	homeA     string // primary sandbox HOME
 	homeB     string // second machine, used by the pull test
+	addrB     string // the second member's server ("" = no member checks)
+	homeM     string // the second member's sandbox HOME
 	projDir   string
 	tmpRoot   string
 	hostName  string
@@ -77,6 +83,9 @@ var (
 	docObj      string
 	taskObj     string
 	task2Obj    string
+
+	memberIdentity string
+	memberReady    bool // the member joined the collab space and set it up
 )
 
 func TestMain(m *testing.M) { os.Exit(mainRun(m)) }
@@ -96,6 +105,14 @@ func mainRun(m *testing.M) (code int) {
 	}
 	if err := health(); err != nil {
 		return fail("any server not reachable at %s (%v) — start it with `any run`", addr, err)
+	}
+	if addrB = os.Getenv("ANY_AGENTS_ADDR_B"); addrB != "" {
+		if addrB == addr {
+			return fail("ANY_AGENTS_ADDR_B must name another server (another account) than ANY_AGENTS_ADDR")
+		}
+		if err := healthAt(addrB); err != nil {
+			return fail("member server not reachable at %s (%v)", addrB, err)
+		}
 	}
 	var err error
 	if tmpRoot, err = os.MkdirTemp("", "any-agents-e2e-"); err != nil {
@@ -124,8 +141,9 @@ func mainRun(m *testing.M) (code int) {
 	}
 
 	homeA, homeB = filepath.Join(tmpRoot, "homeA"), filepath.Join(tmpRoot, "homeB")
+	homeM = filepath.Join(tmpRoot, "homeM")
 	projDir = filepath.Join(tmpRoot, "proj")
-	for _, d := range []string{toolHome(homeA), toolHome(homeB), projDir} {
+	for _, d := range []string{toolHome(homeA), toolHome(homeB), toolHome(homeM), projDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fail("mkdir %s: %v", d, err)
 		}
@@ -189,6 +207,8 @@ func TestE2E(t *testing.T) {
 	t.Run("plan_collection_on_a_task_and_standalone", testPlans)
 	t.Run("session_note_summary_end_and_transcript", testSessionLifecycle)
 	t.Run("collab_space_create_share_and_remove", testCollabSpace)
+	t.Run("collab_space_second_member_joins", testCollabMember)
+	t.Run("shared_memory_move_edit_push_and_mirror", testSharedMemory)
 	t.Run("search_finds_the_doc_body", testSearch)
 	t.Run("feedback_and_stats", testFeedbackAndStats)
 	t.Run("prompt_hook_recalls_once_per_session", testPromptHook)
@@ -200,19 +220,24 @@ func TestE2E(t *testing.T) {
 
 var cleanup struct {
 	sync.Mutex
-	ids  map[string]bool
+	ids  map[string]map[string]bool // server → space ids
 	done bool
 	ok   bool
 }
 
 // trackSpace records a space this run created, for cleanupSpaces.
-func trackSpace(id string) {
+func trackSpace(id string) { trackSpaceAt(addr, id) }
+
+func trackSpaceAt(server, id string) {
 	cleanup.Lock()
 	defer cleanup.Unlock()
 	if cleanup.ids == nil {
-		cleanup.ids = map[string]bool{}
+		cleanup.ids = map[string]map[string]bool{}
 	}
-	cleanup.ids[id] = true
+	if cleanup.ids[server] == nil {
+		cleanup.ids[server] = map[string]bool{}
+	}
+	cleanup.ids[server][id] = true
 }
 
 // ownSpaceName reports whether a space name carries this run's unique
@@ -221,11 +246,9 @@ func ownSpaceName(name string) bool {
 	return spaceName != "" && (name == spaceName || strings.HasPrefix(name, spaceName+"-"))
 }
 
-// cleanupSpaces deletes the spaces this run created, once: the tracked
-// ids plus any active space named with the run's prefix (one a command
-// created before its id was recorded). A tracked id whose name does not
-// carry the prefix is refused, so no other space of the account is ever
-// touched.
+// cleanupSpaces deletes the spaces this run created, once, on every
+// server of the run (the member's server last: its delete of the collab
+// space only drops its own copy).
 func cleanupSpaces() bool {
 	cleanup.Lock()
 	defer cleanup.Unlock()
@@ -240,25 +263,44 @@ func cleanupSpaces() bool {
 		fmt.Fprintf(os.Stderr, "e2e: ANY_AGENTS_E2E_KEEP=1 — spaces %s* and %s left behind\n", spaceName, tmpRoot)
 		return true
 	}
+	servers := []string{addr}
+	if addrB != "" {
+		servers = append(servers, addrB)
+	}
+	for _, server := range servers {
+		if !cleanupServer(server) {
+			cleanup.ok = false
+		}
+	}
+	return cleanup.ok
+}
+
+// cleanupServer deletes one server's share of the run's spaces: the
+// tracked ids plus any active space named with the run's prefix (one a
+// command created before its id was recorded). A tracked id whose name
+// does not carry the prefix is refused, so no other space of the account
+// is ever touched.
+func cleanupServer(server string) bool {
+	ok := true
 	ids := map[string]bool{}
-	for id := range cleanup.ids {
-		info, err := getSpace(id)
+	for id := range cleanup.ids[server] {
+		info, err := getSpaceAt(server, id)
 		switch {
 		case err != nil:
-			fmt.Fprintf(os.Stderr, "e2e cleanup: read space %s: %v\n", id, err)
-			cleanup.ok = false
+			fmt.Fprintf(os.Stderr, "e2e cleanup: read space %s on %s: %v\n", id, server, err)
+			ok = false
 		case info.Status == "deleted":
 		case !ownSpaceName(info.Name):
 			fmt.Fprintf(os.Stderr, "e2e cleanup: refusing to delete %s (%q is not a space of this run)\n", id, info.Name)
-			cleanup.ok = false
+			ok = false
 		default:
 			ids[id] = true
 		}
 	}
-	spaces, err := listSpaces()
+	spaces, err := listSpacesAt(server)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "e2e cleanup: list spaces: %v\n", err)
-		cleanup.ok = false
+		fmt.Fprintf(os.Stderr, "e2e cleanup: list spaces on %s: %v\n", server, err)
+		ok = false
 	}
 	for _, s := range spaces {
 		if ownSpaceName(s.Name) {
@@ -266,14 +308,14 @@ func cleanupSpaces() bool {
 		}
 	}
 	for id := range ids {
-		if err := deleteSpace(id); err != nil {
-			fmt.Fprintf(os.Stderr, "e2e cleanup: delete space %s: %v\n", id, err)
-			cleanup.ok = false
+		if err := deleteSpaceAt(server, id); err != nil {
+			fmt.Fprintf(os.Stderr, "e2e cleanup: delete space %s on %s: %v\n", id, server, err)
+			ok = false
 		} else {
-			fmt.Fprintf(os.Stderr, "e2e cleanup: deleted space %s\n", id)
+			fmt.Fprintf(os.Stderr, "e2e cleanup: deleted space %s on %s\n", id, server)
 		}
 	}
-	return cleanup.ok
+	return ok
 }
 
 // guardCleanup deletes the run's spaces before `go test -timeout` kills
@@ -1389,6 +1431,409 @@ func testCollabSpace(t *testing.T) {
 	}
 }
 
+// --- 8b. a second member ---
+
+// testCollabMember joins a second account (ANY_AGENTS_ADDR_B) to the
+// collab space as a writer: install on its own machine, invite, join,
+// accept, then `space add` adopts the bundles the owner installed.
+func testCollabMember(t *testing.T) {
+	if addrB == "" {
+		t.Skip("ANY_AGENTS_ADDR_B unset: no second member")
+	}
+	if teamId == "" {
+		t.Fatal("no collab space: collab_space_create_share_and_remove failed")
+	}
+	runCLI(t, runOpts{member: true}, "install", "--create-space")
+	sm := loadStateT(t, homeM)
+	if sm.Private != "" {
+		trackSpaceAt(addrB, sm.Private)
+	}
+	memberIdentity = sm.Identity
+	if memberIdentity == "" || memberIdentity == identity {
+		t.Fatalf("member identity %q: want a second account (the owner is %s)", memberIdentity, identity)
+	}
+
+	var inv struct {
+		InviteToken string `json:"inviteToken"`
+	}
+	apiPost(t, "/v1/spaces/"+teamId+"/invites", nil, &inv)
+	apiDoAt(t, addrB, "POST", "/v1/spaces/join", map[string]any{"inviteToken": inv.InviteToken}, nil)
+	var requestId string
+	waitFor(t, 60*time.Second, "the member's join request", func() bool {
+		var out struct {
+			Requests []struct{ RecordId, Identity string } `json:"requests"`
+		}
+		apiGet(t, "/v1/spaces/"+teamId+"/members/requests", &out)
+		for _, r := range out.Requests {
+			if r.Identity == memberIdentity {
+				requestId = r.RecordId
+				return true
+			}
+		}
+		return false
+	})
+	apiPost(t, "/v1/spaces/"+teamId+"/acl/accept", map[string]any{"requestRecordId": requestId, "permission": "writer"}, nil)
+	waitFor(t, 60*time.Second, "the member's copy of the collab space to turn active", func() bool {
+		info, err := getSpaceAt(addrB, teamId)
+		return err == nil && info.Status == "active" && info.OwnRole == "writer"
+	})
+
+	// right after the join the bundles' roots are still syncing: space add
+	// answers bundle.not_ready until they arrive
+	var out string
+	waitFor(t, 60*time.Second, "the member's server to sync the collab space's bundles", func() bool {
+		stdout, stderr, err := execCLI(runOpts{member: true}, "space", "add", teamId)
+		if err != nil && !strings.Contains(stderr, "bundle.not_ready") {
+			t.Fatalf("member space add: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		out = stdout
+		return err == nil
+	})
+	mustContain(t, out, teamId+"  "+teamName+" set up as a collab space", "member space add")
+	ts, tm := loadStateT(t, homeA).Spaces[teamId], loadStateT(t, homeM).Spaces[teamId]
+	if ts == nil || tm == nil {
+		t.Fatalf("collab space %s missing from a state.json (owner %v, member %v)", teamId, ts != nil, tm != nil)
+	}
+	mustEqual(t, tm.Kind, "collab", "member's collab space kind")
+	for name := range ts.Bundles {
+		mustEqual(t, tm.owner(name), ts.owner(name), "member's bundle "+name+" root (adopted, not reinstalled)")
+	}
+	mustEqual(t, tm.coll("memories"), ts.coll("memories"), "member's memories dataset")
+	memberReady = !t.Failed()
+}
+
+// --- 8c. shared memories ---
+
+// testSharedMemory covers shared project memories from the publisher's
+// side (share --move, edits through push and the post-tool hook, a file
+// written into the mirror, unshare, the private copy winning, a failing
+// batch) and, with a second member, the read-only side.
+func testSharedMemory(t *testing.T) {
+	if teamId == "" {
+		t.Fatal("no collab space: collab_space_create_share_and_remove failed")
+	}
+	st := loadStateT(t, homeA)
+	ps, ts := st.priv(), st.Spaces[teamId]
+	if ts == nil {
+		t.Fatalf("state.json has no collab space %s", teamId)
+	}
+	if !memberReady {
+		t.Log("no second member: the read-only side is not exercised")
+	}
+	const (
+		gamma, delta, eps, zeta, eta = "e2e-shared-gamma", "e2e-shared-delta", "e2e-shared-epsilon", "e2e-shared-zeta", "e2e-shared-eta"
+		gammaDesc, deltaDesc         = "Gamma memory moved to the team", "Delta memory moved to the team"
+	)
+	recId := func(slug string) string { return scope + ":" + slug }
+	memDir := memoryDir(homeA, projDir)
+	mirror := filepath.Join(memDir, "shared", sharedDir(teamName, teamId))
+	index := func() string { t.Helper(); return readFile(t, filepath.Join(memDir, "MEMORY.md")) }
+	teamBody := func(slug string) string {
+		t.Helper()
+		return fmt.Sprint(teamMemRecords(t, addr, ts)[recId(slug)]["body"])
+	}
+	gammaPath, deltaPath := filepath.Join(mirror, gamma+".md"), filepath.Join(mirror, delta+".md")
+	gammaFile := func(body string) string { return sharedMemFile(gamma, gammaDesc, "project", teamName, body) }
+
+	// two private memories, then one share --move call for both
+	writeFile(t, filepath.Join(memDir, gamma+".md"), memFile(gamma, gammaDesc, "project", "Gamma body, written privately."))
+	writeFile(t, filepath.Join(memDir, delta+".md"), memFile(delta, deltaDesc, "reference", "Delta body, written privately."))
+	runCLI(t, runOpts{}, "push")
+	recs := memRecords(t, ps)
+	for _, slug := range []string{gamma, delta} {
+		if r := recs[recId(slug)]; r == nil || fmt.Sprint(r["kind"]) == "retracted" {
+			t.Fatalf("no live private record %s after push (have %v)", recId(slug), keys(recs))
+		}
+	}
+	out, errOut := runCLI(t, runOpts{}, "memory", "share", gamma, delta, "--space", teamName, "--move")
+	mustNotLogErrors(t, errOut, "memory share --move")
+	team := teamMemRecords(t, addr, ts)
+	recs = memRecords(t, ps)
+	idx := index()
+	for _, slug := range []string{gamma, delta} {
+		mustContain(t, out, slug+" moved to "+teamName+" as "+recId(slug), "memory share --move output")
+		if r := team[recId(slug)]; r == nil {
+			t.Errorf("no team record %s after share --move (have %v)", recId(slug), keys(team))
+		} else {
+			mustEqual(t, fmt.Sprint(r["author"]), identity, slug+" team record author")
+			mustContain(t, fmt.Sprint(r["body"]), "written privately", slug+" team record body")
+		}
+		mustEqual(t, fmt.Sprint(recs[recId(slug)]["kind"]), "retracted", slug+" private record kind after --move")
+		mustNotExist(t, filepath.Join(memDir, slug+".md"), "the private file of "+slug+" after --move")
+		p := filepath.Join(mirror, slug+".md")
+		mustBeWritable(t, p, true, slug+" mirror file after --move")
+		mustContain(t, readFile(t, p), "\n  shared: "+teamName+"\n", slug+" mirror file frontmatter")
+		mustListShared(t, idx, slug)
+	}
+	mustEqual(t, fmt.Sprint(team[recId(delta)]["kind"]), "reference", "delta team record kind")
+
+	// a pull brings no private copy back
+	out, errOut = runCLI(t, runOpts{}, "pull")
+	mustNotLogErrors(t, errOut, "pull after share --move")
+	mustContain(t, out, "1 shared set(s)", "pull output after share --move")
+	for _, slug := range []string{gamma, delta} {
+		mustNotExist(t, filepath.Join(memDir, slug+".md"), "the private file of "+slug+" after a pull")
+		mustBeWritable(t, filepath.Join(mirror, slug+".md"), true, slug+" mirror file after a pull")
+	}
+
+	// the publisher's mirror file syncs like a private one: push publishes
+	// an edit and the next pull keeps it
+	writeFile(t, gammaPath, gammaFile("Gamma body, edited in the mirror."))
+	runCLI(t, runOpts{}, "push")
+	mustContain(t, teamBody(gamma), "edited in the mirror", "gamma team body after push")
+	_, errOut = runCLI(t, runOpts{}, "pull")
+	mustNotLogErrors(t, errOut, "pull after the mirror edit")
+	mustEqual(t, readFile(t, gammaPath), gammaFile("Gamma body, edited in the mirror."), "gamma mirror file after pull")
+	mustNotExist(t, gammaPath+".conflict", "a .conflict copy after pushing a mirror edit")
+
+	// the post-tool hook pushes a file-tool edit and a shell edit
+	deltaFile := sharedMemFile(delta, deltaDesc, "reference", teamName, "Delta body, edited through the post-tool hook.")
+	writeFile(t, deltaPath, deltaFile)
+	mustNotLogErrors(t, postToolHook(t, runOpts{}, deltaPath, ""), "post-tool hook on an own shared file")
+	mustContain(t, teamBody(delta), "edited through the post-tool hook", "delta team body after the post-tool hook")
+	writeFile(t, gammaPath, gammaFile("Gamma body, edited by a shell command."))
+	mustNotLogErrors(t, postToolHook(t, runOpts{}, "", "sed -i 's/a/a/' "+gammaPath), "post-tool hook on a shell edit")
+	mustContain(t, teamBody(gamma), "edited by a shell command", "gamma team body after the shell-edit hook")
+	_, errOut = runCLI(t, runOpts{}, "pull")
+	mustNotLogErrors(t, errOut, "pull after the hook pushes")
+	mustEqual(t, readFile(t, gammaPath), gammaFile("Gamma body, edited by a shell command."), "gamma mirror file after the hook push")
+	mustEqual(t, readFile(t, deltaPath), deltaFile, "delta mirror file after the hook push")
+	for _, p := range []string{gammaPath, deltaPath} {
+		mustNotExist(t, p+".conflict", "a .conflict copy after the hook pushes")
+	}
+
+	// the member's copy is read-only and the space always wins there
+	memDirM := memoryDir(homeM, projDir)
+	mirrorM := filepath.Join(memDirM, "shared", sharedDir(teamName, teamId))
+	gammaM, deltaM := filepath.Join(mirrorM, gamma+".md"), filepath.Join(mirrorM, delta+".md")
+	var tm *spaceState
+	if memberReady {
+		tm = loadStateT(t, homeM).Spaces[teamId]
+		waitMemberRecord(t, tm, recId(gamma), "the shell edit of gamma", bodyHas("edited by a shell command"))
+		waitMemberRecord(t, tm, recId(delta), "the hook edit of delta", bodyHas("edited through the post-tool hook"))
+		out, errOut = runCLI(t, runOpts{member: true}, "pull")
+		mustNotLogErrors(t, errOut, "member pull")
+		mustContain(t, out, "1 shared set(s)", "member pull output")
+		mustEqual(t, readFile(t, gammaM), gammaFile("Gamma body, edited by a shell command."), "member's gamma file")
+		mustEqual(t, readFile(t, deltaM), deltaFile, "member's delta file")
+		mustBeWritable(t, gammaM, false, "member's gamma file")
+		mustListShared(t, readFile(t, filepath.Join(memDirM, "MEMORY.md")), gamma)
+
+		// an edit of another member's file is never pushed
+		forceWrite(t, gammaM, gammaFile("Gamma body, tampered by the member."), 0o444)
+		errOut = postToolHook(t, runOpts{member: true}, gammaM, "")
+		mustContain(t, errOut, "is a read-only mirror of another member's memory", "member post-tool hook on the owner's file")
+		mustContain(t, fmt.Sprint(teamMemRecords(t, addrB, tm)[recId(gamma)]["body"]), "edited by a shell command",
+			"gamma team body after the member's hook")
+		_, errOut = runCLI(t, runOpts{member: true}, "pull")
+		mustNotLogErrors(t, errOut, "member pull over a tampered file")
+		mustEqual(t, readFile(t, gammaM), gammaFile("Gamma body, edited by a shell command."), "member's gamma file after pull")
+		mustBeWritable(t, gammaM, false, "member's gamma file rewritten by pull")
+
+		// the publisher's next edit replaces the member's copy, still read-only
+		writeFile(t, gammaPath, gammaFile("Gamma body, third revision."))
+		runCLI(t, runOpts{}, "push")
+		waitMemberRecord(t, tm, recId(gamma), "the third revision of gamma", bodyHas("third revision"))
+		runCLI(t, runOpts{member: true}, "pull")
+		mustEqual(t, readFile(t, gammaM), gammaFile("Gamma body, third revision."), "member's gamma file after an update")
+		mustBeWritable(t, gammaM, false, "member's gamma file after an update")
+		_, errOut = runCLI(t, runOpts{member: true}, "push")
+		mustNotLogErrors(t, errOut, "member push (other members' files are never pushed)")
+
+		// the member's publish of the same slug is refused, and a refused
+		// --move keeps the private file
+		privM := filepath.Join(memDirM, gamma+".md")
+		writeFile(t, privM, memFile(gamma, "The member's own gamma", "project", "Member body."))
+		_, errOut = runCLI(t, runOpts{member: true, wantFail: true}, "memory", "share", gamma, "--space", teamName, "--move")
+		mustContain(t, errOut, "any-agents: "+recId(gamma)+": ", "member share of the owner's slug")
+		mustContain(t, errOut, "author", "member share rejection reason")
+		mustContain(t, errOut, "published by another member", "member share rejection hint")
+		if _, err := os.Stat(privM); err != nil {
+			t.Errorf("a refused share --move removed the member's private file: %v", err)
+		}
+		r := teamMemRecords(t, addrB, tm)[recId(gamma)]
+		mustEqual(t, fmt.Sprint(r["author"]), identity, "gamma author after the member's refused share")
+		mustContain(t, fmt.Sprint(r["body"]), "third revision", "gamma body after the member's refused share")
+		if err := os.Remove(privM); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// a new file written into the mirror is a share: pull keeps it until
+	// push publishes it
+	epsPath := filepath.Join(mirror, eps+".md")
+	writeFile(t, epsPath, memFile(eps, "Epsilon written straight into the mirror", "project", "Epsilon body, never private."))
+	_, errOut = runCLI(t, runOpts{}, "pull")
+	mustNotLogErrors(t, errOut, "pull with a new mirror file")
+	if _, err := os.Stat(epsPath); err != nil {
+		t.Fatalf("pull removed an own mirror file not pushed yet: %v", err)
+	}
+	runCLI(t, runOpts{}, "push")
+	if r := teamMemRecords(t, addr, ts)[recId(eps)]; r == nil {
+		t.Errorf("push did not publish the new mirror file as %s", recId(eps))
+	} else {
+		mustEqual(t, fmt.Sprint(r["author"]), identity, "epsilon team record author")
+		mustEqual(t, fmt.Sprint(r["title"]), "Epsilon written straight into the mirror", "epsilon team record title")
+		mustContain(t, fmt.Sprint(r["body"]), "never private", "epsilon team record body")
+	}
+	mustEqual(t, memRecords(t, ps)[recId(eps)] == nil, true, "no private record for a file written into the mirror")
+	runCLI(t, runOpts{}, "pull")
+	mustBeWritable(t, epsPath, true, "epsilon mirror file after push and pull")
+	mustListShared(t, index(), eps)
+	if memberReady {
+		waitMemberRecord(t, tm, recId(eps), "epsilon", bodyHas("never private"))
+		runCLI(t, runOpts{member: true}, "pull")
+		epsM := filepath.Join(mirrorM, eps+".md")
+		mustContain(t, readFile(t, epsM), "Epsilon body, never private.", "member's epsilon file")
+		mustBeWritable(t, epsM, false, "member's epsilon file")
+	}
+
+	// unshare retracts; every member's pull drops the file
+	out, _ = runCLI(t, runOpts{}, "memory", "unshare", delta, "--space", teamName)
+	mustContain(t, out, recId(delta)+" retracted from "+teamName, "memory unshare output")
+	mustEqual(t, fmt.Sprint(teamMemRecords(t, addr, ts)[recId(delta)]["kind"]), "retracted", "delta team record kind after unshare")
+	_, errOut = runCLI(t, runOpts{}, "pull")
+	mustNotLogErrors(t, errOut, "pull after unshare")
+	mustNotExist(t, deltaPath, "the owner's delta file after unshare and pull")
+	if strings.Contains(index(), "["+delta+"]") {
+		t.Errorf("MEMORY.md still lists the unshared %s:\n%s", delta, index())
+	}
+	if memberReady {
+		waitMemberRecord(t, tm, recId(delta), "the retraction of delta", func(r map[string]any) bool {
+			return fmt.Sprint(r["kind"]) == "retracted"
+		})
+		runCLI(t, runOpts{member: true}, "pull")
+		mustNotExist(t, deltaM, "the member's delta file after unshare and pull")
+		if idxM := readFile(t, filepath.Join(memDirM, "MEMORY.md")); strings.Contains(idxM, "["+delta+"]") {
+			t.Errorf("the member's MEMORY.md still lists the unshared %s:\n%s", delta, idxM)
+		}
+	}
+
+	// share without --move: the private copy wins and the mirror skips it
+	zetaPriv := filepath.Join(memDir, zeta+".md")
+	writeFile(t, zetaPriv, memFile(zeta, "Zeta stays private", "project", "Zeta body, private and shared."))
+	runCLI(t, runOpts{}, "push")
+	out, _ = runCLI(t, runOpts{}, "memory", "share", zeta, "--space", teamName)
+	mustContain(t, out, zeta+" shared to "+teamName+" as "+recId(zeta), "memory share output")
+	mustEqual(t, fmt.Sprint(teamMemRecords(t, addr, ts)[recId(zeta)]["author"]), identity, "zeta team record author")
+	mustEqual(t, fmt.Sprint(memRecords(t, ps)[recId(zeta)]["kind"]), "project", "zeta private record kind after a share without --move")
+	if _, err := os.Stat(zetaPriv); err != nil {
+		t.Errorf("share without --move removed the private file: %v", err)
+	}
+	_, errOut = runCLI(t, runOpts{}, "pull")
+	mustContain(t, errOut, "the private copies win", "pull stderr with a memory both private and shared")
+	mustNotExist(t, filepath.Join(mirror, zeta+".md"), "a mirror file of the private zeta")
+	idx = index()
+	if n := strings.Count(idx, "["+zeta+"]"); n != 1 {
+		t.Errorf("MEMORY.md lists %s %d times, want once:\n%s", zeta, n, idx)
+	}
+	mustContain(t, idx, "["+zeta+"]("+zeta+".md)", "MEMORY.md lists zeta as the private file")
+
+	// a batch with an unknown slug fails before anything is shared
+	etaPriv := filepath.Join(memDir, eta+".md")
+	writeFile(t, etaPriv, memFile(eta, "Eta never leaves", "project", "Eta body."))
+	_, errOut = runCLI(t, runOpts{wantFail: true}, "memory", "share", eta, "e2e-no-such-memory", "--space", teamName)
+	mustContain(t, errOut, filepath.Join(memDir, "e2e-no-such-memory.md"), "memory share with an unknown slug")
+	if r := teamMemRecords(t, addr, ts)[recId(eta)]; r != nil {
+		t.Errorf("a failed batch still shared %s: %s", eta, mustJSON(r))
+	}
+	if err := os.Remove(etaPriv); err != nil {
+		t.Fatal(err)
+	}
+
+	// leave the project as the later subtests expect it: one live private
+	// memory, nothing both private and shared
+	runCLI(t, runOpts{}, "memory", "unshare", zeta, "--space", teamName)
+	if err := os.Remove(zetaPriv); err != nil {
+		t.Fatal(err)
+	}
+	runCLI(t, runOpts{}, "push")
+	mustEqual(t, fmt.Sprint(memRecords(t, ps)[recId(zeta)]["kind"]), "retracted", "zeta private record after the cleanup")
+}
+
+// teamMemRecords reads a collab space's memory records for the scope
+// through one server (the owner's or the member's).
+func teamMemRecords(t *testing.T, server string, sp *spaceState) map[string]map[string]any {
+	t.Helper()
+	return recordsById(apiRecordsAt(t, server, sp.Id, sp.owner("app"), sp.coll("memories"), map[string]any{"scope": scope}))
+}
+
+// waitMemberRecord polls the member's server until a collab memory record
+// satisfies cond: the owner's writes reach it through the sync network.
+func waitMemberRecord(t *testing.T, tm *spaceState, id, what string, cond func(map[string]any) bool) {
+	t.Helper()
+	waitFor(t, 60*time.Second, "the member's server to sync "+what, func() bool {
+		r := teamMemRecords(t, addrB, tm)[id]
+		return r != nil && cond(r)
+	})
+}
+
+func bodyHas(s string) func(map[string]any) bool {
+	return func(r map[string]any) bool { return strings.Contains(fmt.Sprint(r["body"]), s) }
+}
+
+// postToolHook pipes a PostToolUse payload (a file-tool edit, or a shell
+// command when filePath is empty) and returns the hook's stderr.
+func postToolHook(t *testing.T, o runOpts, filePath, command string) string {
+	t.Helper()
+	in := map[string]any{"session_id": sidA, "cwd": projDir, "tool_name": "Edit",
+		"tool_input": map[string]string{"file_path": filePath}}
+	if filePath == "" {
+		in["tool_name"], in["tool_input"] = "Bash", map[string]string{"command": command}
+	}
+	o.stdin = mustJSON(in)
+	_, errOut := runCLI(t, o, "hook", "--tool", "claude", "post-tool")
+	return errOut
+}
+
+// mustListShared fails unless MEMORY.md lists a slug exactly once, as an
+// entry of the collab space's "Shared by" section.
+func mustListShared(t *testing.T, index, slug string) {
+	t.Helper()
+	if n := strings.Count(index, "["+slug+"]"); n != 1 {
+		t.Errorf("MEMORY.md lists %s %d times, want once:\n%s", slug, n, index)
+		return
+	}
+	head := strings.Index(index, "\n## Shared by "+teamName+" ")
+	entry := strings.Index(index, "["+slug+"](shared/"+sharedDir(teamName, teamId)+"/"+slug+".md)")
+	if head < 0 || entry < head {
+		t.Errorf("MEMORY.md does not list %s under \"Shared by %s\":\n%s", slug, teamName, index)
+	}
+}
+
+// mustBeWritable checks the owner-write bit: the publisher's own mirror
+// files are writable, other members' read-only.
+func mustBeWritable(t *testing.T, path string, want bool, what string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Errorf("%s: %v", what, err)
+		return
+	}
+	if got := fi.Mode()&0o200 != 0; got != want {
+		t.Errorf("%s: mode %v, want writable=%v", what, fi.Mode(), want)
+	}
+}
+
+func mustNotExist(t *testing.T, path, what string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("%s: %s exists (stat err %v)", what, path, err)
+	}
+}
+
+// forceWrite rewrites a (possibly read-only) file and leaves it with mode.
+func forceWrite(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, content)
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- 9. search ---
 
 func testSearch(t *testing.T) {
@@ -1660,6 +2105,7 @@ type runOpts struct {
 	sid      string // CLAUDE_SESSION_ID
 	extraEnv []string
 	wantFail bool
+	member   bool // run as the second member: homeM, addrB, its own private space
 }
 
 // bridgeHome is the sandbox's ANY_AGENTS_HOME, toolHome its CLAUDE_CONFIG_DIR.
@@ -1667,7 +2113,10 @@ func bridgeHome(home string) string { return filepath.Join(home, ".any-agents") 
 func toolHome(home string) string   { return filepath.Join(home, ".claude") }
 
 func execCLI(o runOpts, args ...string) (stdout, stderr string, err error) {
-	home, dir := o.home, o.dir
+	home, dir, server, private := o.home, o.dir, addr, spaceName
+	if o.member {
+		home, server, private = homeM, addrB, spaceName+"-member"
+	}
 	if home == "" {
 		home = homeA
 	}
@@ -1685,8 +2134,8 @@ func execCLI(o runOpts, args ...string) (stdout, stderr string, err error) {
 		"ANY_AGENTS_E2E=1",
 		"ANY_AGENTS_HOME=" + bridgeHome(home),
 		"CLAUDE_CONFIG_DIR=" + toolHome(home),
-		"ANY_AGENTS_SPACE=" + spaceName,
-		"ANY_AGENTS_ADDR=" + addr,
+		"ANY_AGENTS_SPACE=" + private,
+		"ANY_AGENTS_ADDR=" + server,
 	}, o.extraEnv...)
 	if o.sid != "" {
 		cmd.Env = append(cmd.Env, "CLAUDE_SESSION_ID="+o.sid)
@@ -1870,10 +2319,46 @@ func memFile(name, description, kind, body string) string {
 		name, description, kind, body)
 }
 
+// sharedMemFile mirrors memfiles.go's renderSharedMemFile: the memory
+// file plus the collab space it is shared in.
+func sharedMemFile(name, description, kind, space, body string) string {
+	return fmt.Sprintf("---\nname: %s\ndescription: %s\nmetadata:\n  type: %s\n  shared: %s\n---\n\n%s\n",
+		name, description, kind, space, body)
+}
+
+// sharedDir mirrors syncmem.go's sharedDirName: the space name folded to
+// [a-z0-9-] plus the last six alphanumerics of its id.
+func sharedDir(name, id string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+			b.WriteRune('-')
+		}
+	}
+	folded := strings.Trim(b.String(), "-")
+	if folded == "" {
+		folded = "space"
+	}
+	tail := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, id)
+	if len(tail) > 6 {
+		tail = tail[len(tail)-6:]
+	}
+	return folded + "-" + tail
+}
+
 // --- HTTP ---
 
-func health() error {
-	resp, err := http.Get("http://" + addr + "/v1/health")
+func health() error { return healthAt(addr) }
+
+func healthAt(server string) error {
+	resp, err := http.Get("http://" + server + "/v1/health")
 	if err != nil {
 		return err
 	}
@@ -1886,13 +2371,16 @@ func health() error {
 }
 
 type spaceInfo struct {
-	Id     string `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	Id      string `json:"id"`
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	OwnRole string `json:"ownRole"`
 }
 
-func httpJSON(method, path string, out any) error {
-	req, err := http.NewRequest(method, "http://"+addr+path, nil)
+func httpJSON(method, path string, out any) error { return httpJSONAt(addr, method, path, out) }
+
+func httpJSONAt(server, method, path string, out any) error {
+	req, err := http.NewRequest(method, "http://"+server+path, nil)
 	if err != nil {
 		return err
 	}
@@ -1911,27 +2399,36 @@ func httpJSON(method, path string, out any) error {
 	return nil
 }
 
-func listSpaces() ([]spaceInfo, error) {
+func listSpacesAt(server string) ([]spaceInfo, error) {
 	var out struct {
 		Spaces []spaceInfo `json:"spaces"`
 	}
-	return out.Spaces, httpJSON("GET", "/v1/spaces", &out)
+	return out.Spaces, httpJSONAt(server, "GET", "/v1/spaces", &out)
 }
 
-func getSpace(id string) (spaceInfo, error) {
+func getSpace(id string) (spaceInfo, error) { return getSpaceAt(addr, id) }
+
+func getSpaceAt(server, id string) (spaceInfo, error) {
 	var out spaceInfo
-	return out, httpJSON("GET", "/v1/spaces/"+id, &out)
+	return out, httpJSONAt(server, "GET", "/v1/spaces/"+id, &out)
 }
 
-func deleteSpace(id string) error { return httpJSON("DELETE", "/v1/spaces/"+id, nil) }
+func deleteSpaceAt(server, id string) error {
+	return httpJSONAt(server, "DELETE", "/v1/spaces/"+id, nil)
+}
 
 func apiDo(t *testing.T, method, path string, in, out any) {
+	t.Helper()
+	apiDoAt(t, addr, method, path, in, out)
+}
+
+func apiDoAt(t *testing.T, server, method, path string, in, out any) {
 	t.Helper()
 	var body io.Reader
 	if in != nil {
 		body = strings.NewReader(mustJSON(in))
 	}
-	req, err := http.NewRequest(method, "http://"+addr+path, body)
+	req, err := http.NewRequest(method, "http://"+server+path, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2035,6 +2532,11 @@ func apiRecords(t *testing.T, objectId, dataset string, filter map[string]any) [
 
 func apiRecordsIn(t *testing.T, space, objectId, dataset string, filter map[string]any) []map[string]any {
 	t.Helper()
+	return apiRecordsAt(t, addr, space, objectId, dataset, filter)
+}
+
+func apiRecordsAt(t *testing.T, server, space, objectId, dataset string, filter map[string]any) []map[string]any {
+	t.Helper()
 	var out struct {
 		Records []map[string]any `json:"records"`
 	}
@@ -2042,7 +2544,7 @@ func apiRecordsIn(t *testing.T, space, objectId, dataset string, filter map[stri
 	if filter != nil {
 		body["filter"] = filter
 	}
-	apiPost(t, "/v1/spaces/"+space+"/query", body, &out)
+	apiDoAt(t, server, "POST", "/v1/spaces/"+space+"/query", body, &out)
 	return out.Records
 }
 

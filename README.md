@@ -126,7 +126,7 @@ any-agents session note <text|file|-> | show | update [--summary S] [--title T] 
 any-agents session share --space S [--transcript]
 any-agents collab open <file|-> --space S [--title T] [--to M,…] [--project P] [--linear L] [--announce]
 any-agents collab list [--space S] [--mine] [--status X] | show <id> [-n N] | join <id> | say <id> <text|file|-> | wait <id> [--timeout D] | done <id> | cancel <id>
-any-agents memory share <slug|file.md> --space S [--scope P] | list [--space S] [--scope P] | unshare <slug> --space S
+any-agents memory share <slug|file.md>... --space S [--move] [--scope P] | list [--space S] [--scope P] | unshare <slug> --space S
 any-agents space list | add <name|id> | create <name> | remove <name|id>
 any-agents project list | show <scope> [--space S]        any-agents machine list
 any-agents linear list [--all] | show <KEY> | sync [KEY…]
@@ -167,17 +167,24 @@ A memory worth the whole team's agents knowing (a repo convention, a
 trap in the build) is published into a collab space:
 
 ```
-any-agents memory share <slug|file.md> --space team      # from the project's memory dir
+any-agents memory share <slug|file.md>... --space team   # copies from the project's memory dir
+any-agents memory share <slug>... --space team --move    # the team space becomes the memory's home
 any-agents memory list --space team
 any-agents memory unshare <slug> --space team            # retracts (own records only); the slug can be shared again
 ```
 
 Every member's session start mirrors the collab space's memories for the
-project into `memory/shared/<space>/` as read-only files, lists them in
-`MEMORY.md` under "Shared by <space>", and recall finds them like any
-memory. A record belongs to whoever published it; a second member's
-publish of the same slug is refused. `unshare` retracts rather than
-deletes, because a deleted record id can never be reused.
+project into `memory/shared/<space>/`, lists them in `MEMORY.md` under
+"Shared by <space>", and recall finds them like any memory. A record
+belongs to whoever published it: the publisher's mirror file is writable
+and syncs like a private one (edit it, `push` or the post-tool hook
+publishes the change; a new file written into the mirror dir becomes a
+new shared memory), every other member's copy is read-only and the space
+always wins. A second member's publish of the same slug is refused.
+`--move` retracts the private record and removes the private file, so
+the memory lives on only in the mirror; without it the private copy wins
+and the mirror skips that slug. `unshare` retracts rather than deletes,
+because a deleted record id can never be reused.
 
 ## What is searchable
 

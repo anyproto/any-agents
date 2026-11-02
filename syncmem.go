@@ -264,13 +264,30 @@ func sharedDirName(sp *Space) string {
 	return folded + "-" + id
 }
 
+func sharedStateName(memDir, dir string) string {
+	return syncStateName(memDir) + "-shared-" + dir
+}
+
+// ownFile reports whether a mirror file is this member's own entry:
+// own entries are written writable, other members' entries read-only.
+func ownFile(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode()&0o200 != 0
+}
+
 // pullSharedMemory mirrors every collab space's memories for the project
-// scope into memory/shared/<space>/ as read-only files: the space always
-// wins, files whose records are gone are removed. Returns the sets for
-// the index. Never fatal: a space that fails is skipped.
+// scope into memory/shared/<space>/. Another member's record is a
+// read-only file the space always wins; this member's own records are
+// editable files synced like private ones (remote wins over an unchanged
+// file, a changed file waits for push, two-sided edits newest-wins with a
+// .conflict copy). Files whose records are gone are removed, except an
+// own file never pushed yet. A record that also exists as a private file
+// is skipped: the private copy wins. Returns the sets for the index.
+// Never fatal: a space that fails is skipped.
 func pullSharedMemory(c *Client, st *State, projectDir string) []SharedSet {
 	scope := resolveScope(projectDir)
 	memDir := currentTool().MemoryDir(projectDir)
+	private, _ := scanMemoryDir(memDir, scope)
 	var out []SharedSet
 	for _, sp := range st.collabs() {
 		if !sp.ready() {
@@ -283,45 +300,221 @@ func pullSharedMemory(c *Client, st *State, projectDir string) []SharedSet {
 		}
 		set := SharedSet{Space: sp.Name, Dir: sharedDirName(sp)}
 		dir := filepath.Join(memDir, "shared", set.Dir)
+		ss, err := loadSyncState(sharedStateName(memDir, set.Dir))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "any-agents: shared memories %s: %v\n", sp.Name, err)
+			continue
+		}
+		tracked := map[string]bool{}
+		for _, s := range ss.Records {
+			tracked[s.File] = true
+		}
 		want := map[string]bool{}
 		if len(remote) > 0 {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				continue
 			}
 		}
-		live := 0
-		for _, r := range remote {
+		dup := 0
+		for id, r := range remote {
 			item := memItemFromRecord(r)
 			if item.Kind == kindRetracted {
 				continue
 			}
-			set.Items = append(set.Items, item)
 			file := safeFile(item.Slug)
-			want[file] = true
-			live++
-			content := renderSharedMemFile(item, sp.Name)
-			if cur, err := os.ReadFile(filepath.Join(dir, file)); err == nil && string(cur) == content {
+			target := filepath.Join(dir, file)
+			if _, ok := private[id]; ok {
+				dup++
+				// an own mirror file with unpushed edits is never dropped
+				if s, tracked := ss.Records[id]; tracked && ownFile(target) {
+					if cur, err := parseMemFile(target, scope); err == nil && contentHash(renderSharedMemFile(cur, sp.Name)) != s.Hash {
+						want[file] = true
+						fmt.Fprintf(os.Stderr, "any-agents: shared %s has unpushed edits and a private copy; keeping both\n", id)
+					}
+				}
 				continue
 			}
-			target := filepath.Join(dir, file)
-			_ = os.Chmod(target, 0o644) // a previous mirror is read-only
-			_ = os.WriteFile(target, []byte(content), 0o444)
+			set.Items = append(set.Items, item)
+			want[file] = true
+			content := renderSharedMemFile(item, sp.Name)
+			if author, _ := r["author"].(string); author == st.Identity {
+				syncOwnShared(ss, id, target, content, recordFloat(r, "updatedAt"), scope, sp.Name)
+				continue
+			}
+			delete(ss.Records, id)
+			if cur, err := os.ReadFile(target); err != nil || string(cur) != content {
+				_ = os.Chmod(target, 0o644) // a previous mirror is read-only
+				_ = os.WriteFile(target, []byte(content), 0o444)
+			}
+			// WriteFile keeps an existing file's mode, and a writable file
+			// counts as this member's own (pushed, editable)
+			_ = os.Chmod(target, 0o444)
+		}
+		for id := range ss.Records {
+			if r, ok := remote[id]; !ok || memItemFromRecord(r).Kind == kindRetracted {
+				delete(ss.Records, id)
+			}
 		}
 		if entries, err := os.ReadDir(dir); err == nil {
+			pending := 0
 			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") && !want[e.Name()] {
-					_ = os.Remove(filepath.Join(dir, e.Name()))
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || want[e.Name()] {
+					continue
 				}
+				p := filepath.Join(dir, e.Name())
+				if ownFile(p) && !tracked[e.Name()] {
+					pending++ // this member's own file, not pushed yet
+					if item, err := parseMemFile(p, scope); err == nil && safeFile(item.Slug) == e.Name() {
+						set.Items = append(set.Items, item) // listed before its push, like a private file
+					}
+					continue
+				}
+				_ = os.Remove(p)
 			}
-			if live == 0 {
+			if len(set.Items) == 0 && pending == 0 {
 				_ = os.Remove(dir)
 			}
+		}
+		if len(ss.Records) > 0 || len(tracked) > 0 {
+			_ = ss.save()
+		}
+		if dup > 0 {
+			fmt.Fprintf(os.Stderr, "any-agents: %d shared memories in %s also exist as private files; the private copies win (`memory share --move` keeps one)\n", dup, sp.Name)
 		}
 		if len(set.Items) > 0 {
 			out = append(out, set)
 		}
 	}
 	return out
+}
+
+// syncOwnShared brings one of this member's own shared memories down with
+// the private three-way rule: remote wins over an unchanged file, a
+// changed file waits for push, two-sided edits newest-wins with a
+// .conflict copy of the loser.
+func syncOwnShared(ss *SyncState, id, target, want string, updatedAt float64, scope, space string) {
+	file := filepath.Base(target)
+	wantHash := contentHash(want)
+	write := func() {
+		_ = os.Chmod(target, 0o644)
+		if err := os.WriteFile(target, []byte(want), 0o644); err == nil {
+			ss.Records[id] = &SyncEntry{File: file, Hash: wantHash, RemoteUpdatedAt: updatedAt}
+		}
+	}
+	cur, err := parseMemFile(target, scope)
+	if err != nil {
+		write() // missing or unparseable: the space wins
+		return
+	}
+	_ = os.Chmod(target, 0o644) // mirrored read-only before it was synced as own
+	curHash := contentHash(renderSharedMemFile(cur, space))
+	if curHash == wantHash {
+		ss.Records[id] = &SyncEntry{File: file, Hash: wantHash, RemoteUpdatedAt: updatedAt}
+		return
+	}
+	s, hasState := ss.Records[id]
+	localChanged := !hasState || curHash != s.Hash
+	remoteChanged := !hasState || updatedAt > s.RemoteUpdatedAt+0.5
+	switch {
+	case !localChanged:
+		write()
+	case !remoteChanged: // local wins — push later
+	default:
+		bumpStat("conflicts", 1)
+		if fi, _ := os.Stat(target); fi != nil && float64(fi.ModTime().Unix()) >= updatedAt {
+			fmt.Fprintf(os.Stderr, "any-agents: conflict on shared %s — keeping newer local copy\n", id)
+			return
+		}
+		_ = os.Rename(target, target+".conflict")
+		fmt.Fprintf(os.Stderr, "any-agents: conflict on shared %s — remote newer, local saved as %s.conflict\n", id, file)
+		write()
+	}
+}
+
+// pushSharedMemory publishes this member's own files under
+// memory/shared/<space>/: entries changed since the last sync and new
+// files written there (a file dropped into the mirror is a share). Other
+// members' read-only files are never pushed. Deleting an own file does
+// not retract its record (pull brings it back; `memory unshare` retracts).
+func pushSharedMemory(c *Client, st *State, projectDir string) error {
+	scope := resolveScope(projectDir)
+	memDir := currentTool().MemoryDir(projectDir)
+	origin := shortId(st.Identity)
+	var firstErr error
+	for _, sp := range st.collabs() {
+		if !sp.ready() {
+			continue
+		}
+		dirName := sharedDirName(sp)
+		dir := filepath.Join(memDir, "shared", dirName)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		ss, err := loadSyncState(sharedStateName(memDir, dirName))
+		if err != nil {
+			return err
+		}
+		var records []UpsertRecord
+		files := map[string]string{}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			if !ownFile(p) {
+				continue
+			}
+			item, err := parseMemFile(p, scope)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "any-agents: skip %s: %v\n", p, err)
+				continue
+			}
+			if s, ok := ss.Records[item.Id()]; ok && s.Hash == contentHash(renderSharedMemFile(item, sp.Name)) {
+				continue
+			}
+			records = append(records, item.upsertRecord(origin))
+			files[item.Id()] = e.Name()
+		}
+		if len(records) == 0 {
+			continue
+		}
+		res, err := c.Upsert(sp.Id, sp.owner("app"), sp.coll(dsMemories), records)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		rejected := map[string]bool{}
+		for _, rej := range res.Rejections {
+			rejected[rej.Id] = true
+			hint := ""
+			if strings.Contains(rej.Reason, "author") {
+				hint = " — published by another member"
+			}
+			fmt.Fprintf(os.Stderr, "any-agents: shared push %s: %s%s\n", rej.Id, rej.Reason, hint)
+		}
+		bumpStat("memSynced", res.Created+res.Updated)
+		bumpStat("memRejected", len(res.Rejections))
+		remote, err := fetchScope(c, sp, scope)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for id, file := range files {
+			if r, ok := remote[id]; ok && !rejected[id] {
+				ss.Records[id] = &SyncEntry{File: file,
+					Hash: contentHash(renderSharedMemFile(memItemFromRecord(r), sp.Name)), RemoteUpdatedAt: recordFloat(r, "updatedAt")}
+			}
+		}
+		if err := ss.save(); err != nil {
+			return err
+		}
+	}
+	return firstErr
 }
 
 // pushMemory upserts every parseable local memory file (the server skips

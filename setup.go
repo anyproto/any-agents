@@ -152,8 +152,19 @@ func ensureUsecases(c *Client, sp *Space) error {
 		sp.Usecases = map[string]bool{}
 	}
 	if !sp.Usecases["collections"] {
-		if _, err := c.CatalogSetup(sp.Id, "collections"); err != nil {
-			return fmt.Errorf("collections setup: %w", err)
+		// A just-joined space answers bundle.not_ready until its registry
+		// has synced; wait for it instead of failing the first `space add`.
+		awaitRegistry(c, sp)
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			_, err := c.CatalogSetup(sp.Id, "collections")
+			if err == nil {
+				break
+			}
+			if !isCode(err, "bundle.not_ready") || time.Now().After(deadline) {
+				return fmt.Errorf("collections setup: %w", err)
+			}
+			time.Sleep(time.Second)
 		}
 		sp.Usecases["collections"] = true
 	}
@@ -403,21 +414,32 @@ func addCollabSpace(c *Client, st *State, ref string) (*Space, error) {
 	if st.private() == nil {
 		return nil, fmt.Errorf("not installed — run `any-agents install` first")
 	}
-	spaces, err := c.ListSpaces()
-	if err != nil {
-		return nil, err
-	}
 	var found *SpaceInfo
 	id := parseSpaceId(ref)
-	for i := range spaces {
-		s := &spaces[i]
-		if s.Id == id || strings.EqualFold(s.Name, ref) {
-			found = s
+	// A just-joined space lists before its metadata has synced; wait for
+	// the name so the state does not record an empty one.
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(time.Second) {
+		spaces, err := c.ListSpaces()
+		if err != nil {
+			return nil, err
+		}
+		found = nil
+		for i := range spaces {
+			s := &spaces[i]
+			if s.Id == id || strings.EqualFold(s.Name, ref) {
+				found = s
+				break
+			}
+		}
+		if found == nil {
+			return nil, fmt.Errorf("space %q not found among this account's spaces (join it first)", ref)
+		}
+		if found.Name != "" || time.Now().After(deadline) {
 			break
 		}
 	}
-	if found == nil {
-		return nil, fmt.Errorf("space %q not found among this account's spaces (join it first)", ref)
+	if found.Name == "" {
+		found.Name = shortId(found.Id)
 	}
 	if found.Id == st.Private {
 		return nil, fmt.Errorf("%q is the private space", found.Name)

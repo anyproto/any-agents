@@ -180,8 +180,15 @@ Gaps found on review, with the chosen answer.
 - Team memories: `memory share <slug> --space S` publishes a private
   memory into the collab space's `memories` records (same
   `<scope>:<slug>` ids); every member's session start mirrors the
-  project's shared memories into `memory/shared/<space>/` read-only,
-  lists them in MEMORY.md and recall covers them. The record belongs to
+  project's shared memories into `memory/shared/<space>/`, lists them
+  in MEMORY.md and recall covers them. The publisher's own entries are
+  writable files synced with the private three-way rule and pushed by
+  `push` and the post-tool hook (a new file written into the mirror dir
+  is a new shared memory); other members' entries are read-only and the
+  space always wins. `share --move` retracts the private record and
+  removes the private file, so the collab space becomes the memory's
+  home; without `--move` the private copy wins and the mirror skips
+  the slug. The record belongs to
   its publisher (the dataset's author rule); `memory unshare` retracts
   one's own (kind `retracted`, title and body cleared; readers and
   recall skip it, the mirror file goes) because a

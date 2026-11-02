@@ -291,8 +291,12 @@ func cmdPull(args []string) {
 func cmdPush(args []string) {
 	_, pos := parseArgs("push", args, func(fs *flag.FlagSet) {})
 	c := NewClient()
-	sp := mustSetup(c).private()
+	st := mustSetup(c)
+	sp := st.private()
 	if err := pushMemory(c, sp, projectDirArg(pos)); err != nil {
+		fatal(err)
+	}
+	if err := pushSharedMemory(c, st, projectDirArg(pos)); err != nil {
 		fatal(err)
 	}
 	if err := pushConfig(c, sp); err != nil {

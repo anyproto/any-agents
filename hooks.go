@@ -124,6 +124,9 @@ func hookPostTool(tool Tool) {
 			if err := pushMemory(c, sp, in.Cwd); err != nil {
 				fmt.Fprintf(os.Stderr, "any-agents: push: %v\n", err)
 			}
+			if err := pushSharedMemory(c, st, in.Cwd); err != nil {
+				fmt.Fprintf(os.Stderr, "any-agents: shared push: %v\n", err)
+			}
 		}
 		return
 	}
@@ -133,7 +136,13 @@ func hookPostTool(tool Tool) {
 	}
 	memDir := tool.MemoryDir(in.Cwd)
 	if strings.HasPrefix(path, filepath.Join(memDir, "shared")+string(filepath.Separator)) {
-		fmt.Fprintf(os.Stderr, "any-agents: %s is a read-only mirror of a shared memory; edit the publisher's copy or share your own\n", path)
+		if _, err := os.Stat(path); err == nil && !ownFile(path) {
+			fmt.Fprintf(os.Stderr, "any-agents: %s is a read-only mirror of another member's memory; share your own or ask the publisher\n", path)
+			return
+		}
+		if err := pushSharedMemory(c, st, in.Cwd); err != nil {
+			fmt.Fprintf(os.Stderr, "any-agents: shared push: %v\n", err)
+		}
 		return
 	}
 	if strings.HasPrefix(path, memDir+string(filepath.Separator)) {
