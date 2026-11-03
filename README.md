@@ -15,8 +15,8 @@ team shares docs, tasks and help requests between their agents in
 the native clients, phone included. Sync is CRDT replication, search is
 any's hybrid FTS + vector index.
 
-Claude Code is the first harness; the tool adapter keeps the harness
-specifics (home dir, config roots, memory dir, hooks) in one place.
+Claude Code and Codex use the same Any space. Each harness has its own
+settings, session IDs and local config sync history.
 
 Design: [docs/design.md](docs/design.md).
 
@@ -62,7 +62,40 @@ copies the binary to `~/.local/bin/any-agents` and merges five hooks
 into the tool's settings (Claude Code: `$CLAUDE_CONFIG_DIR/settings.json`,
 default `~/.claude/settings.json`). It is idempotent.
 
-Collab spaces: `any-agents space create <name>` makes one, or
+### Codex
+
+With a running Any server, run the following from the repository.
+
+```sh
+make build
+./bin/any-agents install --tool codex
+```
+
+Add `--create-space` if this is the first installation on the account.
+If Claude Code already uses the private space, the command adds Codex to
+the same space and Machine page. To install Claude explicitly, use
+`--tool claude`. The server is found as for Claude Code (the recorded
+`server.addr`, else `--addr` or `ANY_AGENTS_ADDR` on the install
+command, which the bridge pins for later hooks and CLI calls).
+
+Open `/hooks` in the Codex CLI, review the five commands ending in
+`hook --tool codex …`, and trust them. Start a fresh chat. Its startup
+context includes the Any link to its Session page. Inside that chat,
+`any-agents session show` resolves the active `CODEX_THREAD_ID`.
+Outside a chat, `ANY_AGENTS_TOOL=codex any-agents session show` reads the
+last Codex session. See [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+
+The installer merges the commands into `$CODEX_HOME/hooks.json`
+(default `~/.codex/hooks.json`). It keeps existing hook groups and backs up
+the settings before a change. Both harnesses recall matching memories and
+docs on prompt submission. On session end, the bridge marks the page ended
+and attaches the transcript when Codex supplies a local file. Codex gives
+session-end hooks up to three seconds. Large transcript uploads or slow Any
+servers can exceed that deadline.
+
+### Collab spaces
+
+`any-agents space create <name>` makes one, or
 `any-agents space add <name|id>` registers a space the account already
 joined (a writer installs the bundles, a reader adopts them). Invites
 go through `any invite create <spaceId>` and `any join --token …`.
@@ -92,8 +125,8 @@ setup: [docs/migrating-from-any-claude.md](docs/migrating-from-any-claude.md).
   and page bodies) above `ANY_AGENTS_RAG_MIN` (default 0.030) are
   injected once per session each, collab hits labelled with their space.
 - **post-tool** pushes memory files and config files as they change.
-- **session-end** pushes, closes the Session (status, endedAt), attaches
-  the gzipped transcript, regenerates the status page, flushes stats.
+- **session-end** closes the Session, attaches the gzipped transcript,
+  pushes config and memory, regenerates the status page and flushes stats.
 
 Hooks never break a session: every failure is logged and exits 0.
 
@@ -140,7 +173,7 @@ and never marks the account's read state.
 ## Commands
 
 ```
-any-agents install [--create-space] [--addr HOST:PORT] | status | version
+any-agents install [--tool claude|codex] [--create-space] [--addr HOST:PORT] | status | version
 any-agents pull [dir] [--allow-deletions] | push [dir]
 any-agents search <query> [-n N] [--json] [--space S]
 
@@ -171,7 +204,7 @@ open in any-ui.
 Env: `ANY_AGENTS_ADDR` (default: the running server recorded in
 `~/.any/*/server.addr`, else `127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
 the private space name), `ANY_AGENTS_RAG_MIN` (`0.030`), `ANY_AGENTS_TOOL`
-(`claude`), `ANY_AGENTS_HOME` (`~/.any-agents`: state, sync fingerprints,
+(`claude` or `codex`, auto-detected inside a Codex thread), `ANY_AGENTS_HOME` (`~/.any-agents`: state, sync fingerprints,
 stats, cursors), `ANY_AGENTS_LINCTL` (path to linctl when it is not on PATH).
 
 ## Releases
@@ -205,8 +238,18 @@ as broken and never applied (`pull --allow-deletions` overrides).
 
 The tool's global config files (Claude Code: `CLAUDE.md`,
 `keybindings.json`, `skills/**` minus `skills/synced/`) ride the
-`config` records the same way, keyed `<tool>:<path>`. Settings files
-with machine-specific hook paths are not mirrored.
+`config` records the same way, keyed `<tool>:<path>`. For Codex, the config
+roots are `AGENTS.md`, `AGENTS.override.md`
+and personal files under `$CODEX_HOME/skills/`. The bridge skips symlinks
+and bundled `skills/.system/`. Codex account credentials, `config.toml`,
+hook definitions and the native memory database stay on the machine.
+Skills installed outside this config home are outside the mirror.
+
+The Codex project memory mirror lives in
+`$ANY_AGENTS_HOME/projects/codex-<repo>/memory/` (default
+`~/.any-agents/projects/codex-<repo>/memory/`). The startup context
+includes this path. Memories are shared with Claude through their Any
+records, and each harness keeps its own local copy.
 
 ## Shared project memories
 

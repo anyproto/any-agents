@@ -25,24 +25,30 @@ type Tool interface {
 	ConfigSkipDirs() []string // dirs under Home the tool syncs itself
 	MemoryDir(projectDir string) string
 	SessionEnv() string // env var carrying the session id inside a session
-	InstallHooks(bin string) error
+	HookFile() string
 	ParseHookInput(r io.Reader) *hookInput
 	EmitContext(event, ctx string)
 	EmitBlock(reason string) // Stop hook: keep the agent working, with the reason
 }
 
-var tools = map[string]func() Tool{"claude": func() Tool { return &claudeTool{} }}
+var tools = map[string]func() Tool{
+	"claude": func() Tool { return &claudeTool{} },
+	"codex":  func() Tool { return &codexTool{} },
+}
 
-// currentTool picks the harness: --tool on hooks, else $ANY_AGENTS_TOOL,
-// else claude.
+// An explicit selection wins. Commands run inside Codex pick its thread,
+// even if another harness has opened a session more recently.
 func currentTool() Tool {
 	name := os.Getenv("ANY_AGENTS_TOOL")
+	if name == "" && os.Getenv("CODEX_THREAD_ID") != "" && os.Getenv("CLAUDE_CODE_SESSION_ID") == "" {
+		name = "codex"
+	}
 	if name == "" {
 		name = "claude"
 	}
 	mk := tools[name]
 	if mk == nil {
-		fatal(fmt.Errorf("unknown tool %q (known: claude)", name))
+		fatal(fmt.Errorf("unknown tool %q (known: claude, codex)", name))
 	}
 	return mk()
 }
@@ -63,7 +69,7 @@ type hookInput struct {
 
 // --- Claude Code ---
 
-type claudeTool struct{ version string }
+type claudeTool struct{ commandHooks }
 
 func (t *claudeTool) Name() string  { return "claude" }
 func (t *claudeTool) Label() string { return "Claude" }
@@ -98,26 +104,33 @@ func (t *claudeTool) MemoryDir(projectDir string) string {
 	return filepath.Join(t.Home(), "projects", b.String(), "memory")
 }
 
+func (t *claudeTool) HookFile() string { return filepath.Join(t.Home(), "settings.json") }
+
 func (t *claudeTool) SessionEnv() string { return "CLAUDE_CODE_SESSION_ID" }
 
-// Version runs `claude --version` once (bounded); empty when absent.
-func (t *claudeTool) Version() string {
-	if t.version != "" {
-		return t.version
-	}
+func (t *claudeTool) Version() string { return toolVersion("claude") }
+
+func toolVersion(name string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "claude", "--version").Output()
+	out, err := exec.CommandContext(ctx, name, "--version").Output()
 	if err != nil {
 		return ""
 	}
-	if f := strings.Fields(string(out)); len(f) > 0 {
-		t.version = f[0]
+	fields := strings.Fields(string(out))
+	if len(fields) > 1 && fields[0] == "codex-cli" {
+		return fields[1]
 	}
-	return t.version
+	if len(fields) > 0 {
+		return fields[0]
+	}
+	return ""
 }
 
-func (t *claudeTool) ParseHookInput(r io.Reader) *hookInput {
+// Both harnesses use the same command hook input and output envelopes.
+type commandHooks struct{}
+
+func (commandHooks) ParseHookInput(r io.Reader) *hookInput {
 	var in struct {
 		SessionId      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
@@ -141,59 +154,11 @@ func (t *claudeTool) ParseHookInput(r io.Reader) *hookInput {
 	return h
 }
 
-func (t *claudeTool) EmitContext(event, ctx string) {
+func (commandHooks) EmitContext(event, ctx string) {
 	out := map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": event, "additionalContext": ctx}}
 	_ = json.NewEncoder(os.Stdout).Encode(out)
 }
 
-func (t *claudeTool) EmitBlock(reason string) {
+func (commandHooks) EmitBlock(reason string) {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"decision": "block", "reason": reason})
-}
-
-// InstallHooks merges the bridge's hooks into settings.json, preserving
-// everything else. Idempotent: an existing any-agents entry is replaced.
-func (t *claudeTool) InstallHooks(bin string) error {
-	settingsPath := filepath.Join(t.Home(), "settings.json")
-	raw := map[string]any{}
-	if b, err := os.ReadFile(settingsPath); err == nil {
-		if err := json.Unmarshal(b, &raw); err != nil {
-			return fmt.Errorf("parse %s: %w", settingsPath, err)
-		}
-		_ = os.WriteFile(settingsPath+".bak-any-agents", b, 0o644)
-	}
-	hooks, _ := raw["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-	}
-	set := func(event, matcher, cmd string, timeout int) {
-		hook := map[string]any{"type": "command", "command": cmd}
-		if timeout > 0 {
-			hook["timeout"] = timeout
-		}
-		entry := map[string]any{"hooks": []any{hook}}
-		if matcher != "" {
-			entry["matcher"] = matcher
-		}
-		arr, _ := hooks[event].([]any)
-		kept := make([]any, 0, len(arr))
-		for _, e := range arr { // drop stale entries of ours
-			s := fmt.Sprint(e)
-			if !strings.Contains(s, "any-agents") && !strings.Contains(s, "any-claude") {
-				kept = append(kept, e)
-			}
-		}
-		hooks[event] = append(kept, entry)
-	}
-	cmd := bin + " hook --tool claude "
-	set("SessionStart", "", cmd+"session-start", 60)
-	set("SessionEnd", "", cmd+"session-end", 120)
-	set("PostToolUse", "Write|Edit|MultiEdit|NotebookEdit|Bash", cmd+"post-tool", 0)
-	set("UserPromptSubmit", "", cmd+"prompt", 0)
-	set("Stop", "", cmd+"stop", 30)
-	raw["hooks"] = hooks
-	b, _ := json.MarshalIndent(raw, "", "  ")
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath, append(b, '\n'), 0o644)
 }

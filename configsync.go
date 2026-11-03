@@ -38,7 +38,15 @@ func configId(rel string) string {
 	return configPrefix() + strings.ReplaceAll(rel, "/", ":")
 }
 
-// configPrefix keys this tool's records among all tools'.
+// Keep Claude's existing on-disk baseline. Each other harness compares
+// against its own files before propagating changes or deletions.
+func configStateName() string {
+	if name := currentTool().Name(); name != "claude" {
+		return "config-" + name
+	}
+	return "config"
+}
+
 func configPrefix() string { return currentTool().Name() + ":" }
 
 // maxRecordId is the server's record id limit; a config file whose path
@@ -51,6 +59,35 @@ type localConf struct {
 	text bool
 }
 
+// Resolve only the adapter's declared roots on pull as well as push. In
+// Codex the same home also contains credentials, transcripts and hooks.
+func configPathAllowed(tool Tool, rel string) bool {
+	if !filepath.IsLocal(rel) || filepath.ToSlash(filepath.Clean(rel)) != rel {
+		return false
+	}
+	for _, root := range tool.ConfigRoots() {
+		if rel == root || strings.HasPrefix(rel, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// A personal Codex skill may link into a different part of the home,
+// including auth.json. Neither upload the target nor write through it.
+func codexConfigLink(tool Tool, rel string) bool {
+	if tool.Name() != "codex" {
+		return false
+	}
+	for p := filepath.FromSlash(rel); p != "."; p = filepath.Dir(p) {
+		fi, err := os.Lstat(filepath.Join(tool.Home(), p))
+		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // scanConfigBundle collects the sync bundle, keyed by record id.
 func scanConfigBundle() (map[string]*localConf, error) {
 	out := map[string]*localConf{}
@@ -59,6 +96,9 @@ func scanConfigBundle() (map[string]*localConf, error) {
 	add := func(path string) error {
 		rel, _ := filepath.Rel(base, path)
 		rel = filepath.ToSlash(rel)
+		if codexConfigLink(tool, rel) {
+			return nil
+		}
 		if strings.Contains(rel, ":") { // ':' is our path separator in ids
 			fmt.Fprintf(os.Stderr, "any-agents: skip %s (colon in name)\n", rel)
 			return nil
@@ -121,7 +161,8 @@ func fetchConfigRecords(c *Client, sp *Space) (map[string]map[string]any, error)
 		if kind, _ := r["kind"].(string); kind == kindRetracted {
 			continue // a removed file; the id stays reusable
 		}
-		if id, ok := r["id"].(string); ok && strings.HasPrefix(id, configPrefix()) {
+		rel, _ := r["path"].(string)
+		if id, ok := r["id"].(string); ok && configPathAllowed(currentTool(), rel) && id == configId(rel) && !codexConfigLink(currentTool(), rel) {
 			out[id] = r
 		}
 	}
@@ -149,7 +190,7 @@ func retractConfig(c *Client, sp *Space, ids []string) error {
 // and moves their records out of remote.
 func splitSkipped(ss *SyncState, remote map[string]map[string]any) map[string]map[string]any {
 	for id, s := range ss.Records {
-		if configSkipped(s.File) {
+		if !configPathAllowed(currentTool(), s.File) || configSkipped(s.File) || codexConfigLink(currentTool(), s.File) {
 			delete(ss.Records, id)
 		}
 	}
@@ -176,7 +217,7 @@ func remoteConfigBytes(c *Client, sp *Space, r map[string]any) ([]byte, error) {
 // pullConfig applies remote config files locally (hash-gated, remote wins
 // only over locally-unchanged files — mirror of the memory rules).
 func pullConfig(c *Client, sp *Space) (int, error) {
-	ss, err := loadSyncState("config")
+	ss, err := loadSyncState(configStateName())
 	if err != nil {
 		return 0, err
 	}
@@ -225,6 +266,9 @@ func pullConfig(c *Client, sp *Space) (int, error) {
 			return applied, err
 		}
 		if localChanged {
+			if codexConfigLink(currentTool(), rel+".conflict") {
+				return applied, fmt.Errorf("refusing to write through symlink %s.conflict", rel)
+			}
 			// The space wins, the local version is kept next to it.
 			_ = os.WriteFile(target+".conflict", l.data, 0o644)
 			fmt.Fprintf(os.Stderr, "any-agents: config conflict on %s — taking the space's copy, local saved as %s.conflict\n", rel, rel)
@@ -258,7 +302,7 @@ func pullConfig(c *Client, sp *Space) (int, error) {
 // pushConfig upserts changed bundle files (text inline, binary via
 // files-v2 attach) and deletes records for locally-removed files.
 func pushConfig(c *Client, sp *Space) error {
-	ss, err := loadSyncState("config")
+	ss, err := loadSyncState(configStateName())
 	if err != nil {
 		return err
 	}

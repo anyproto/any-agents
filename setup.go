@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/user"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -299,13 +300,28 @@ func ensureMachine(c *Client, sp *Space) (string, error) {
 			return "", err
 		}
 	}
+	// Several harnesses can use one machine. Register the active one on
+	// setup, without replacing the others on every session end.
+	row, err := c.GetObject(sp.Id, sp.MachineObjectId)
+	if err != nil {
+		return "", err
+	}
+	installed := strings.Fields(strOf(row, sp.owner("machine"), sp.prop("machine", "tools")))
+	if tool := currentTool().Name(); !slices.Contains(installed, tool) {
+		installed = append(installed, tool)
+		slices.Sort(installed)
+		if err := c.SetProperties(sp.Id, sp.MachineObjectId, sp.owner("machine"), props(sp, "machine", map[string]any{
+			"tools": strings.Join(installed, " "),
+		})); err != nil {
+			return "", err
+		}
+	}
 	return sp.MachineObjectId, touchMachine(c, sp, "online")
 }
 
 func touchMachine(c *Client, sp *Space, status string) error {
 	return c.SetProperties(sp.Id, sp.MachineObjectId, sp.owner("machine"), props(sp, "machine", map[string]any{
 		"lastSeen": dateVal(time.Now()), "status": []string{status}, "bridgeVersion": version,
-		"tools": currentTool().Name(),
 	}))
 }
 

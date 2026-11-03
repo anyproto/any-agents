@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -108,10 +109,18 @@ func resolveSession(st *State, flag string) (id string, exact bool) {
 	if flag != "" {
 		return flag, true
 	}
-	if v := os.Getenv(currentTool().SessionEnv()); v != "" {
+	tool := currentTool()
+	if v := os.Getenv(tool.SessionEnv()); v != "" {
 		return v, true
 	}
-	return st.LastSessionId, false
+	if tool.Name() == "claude" {
+		return st.LastSessionId, false
+	}
+	b, err := os.ReadFile(filepath.Join(stateDir(), "last-session-"+tool.Name()))
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "any-agents: last session: %v\n", err)
+	}
+	return strings.TrimSpace(string(b)), false
 }
 
 func trunc(s string, n int) string {

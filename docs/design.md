@@ -1,7 +1,6 @@
 # any-agents — design
 
-Shared context for coding agents (Claude Code first, Codex and others
-through the same adapter), stored in any spaces. One private space per
+Shared context for Claude Code and Codex through a common tool adapter, stored in any spaces. One private space per
 account holds what only the owner's agents need; any number of collab
 spaces hold what a team shares. Humans read and write the same objects
 in any-ui and the native clients, from a phone included.
@@ -95,7 +94,7 @@ memories for the repo and the tool's config → Session page (tool,
 host, cwd, project) → context note: project, session link, open task
 count, the CLI, then the collab digest (open requests nobody took, new
 messages on my collabs). post-tool: push memory and config files as
-they change. session-end: push → session ended → transcript attached →
+they change. session-end: session ended → transcript attached → push →
 status page → stats flushed. Hooks never fail a session.
 
 Recall. Every prompt runs a hybrid search over the private space and
@@ -159,7 +158,7 @@ an id map. The old space stays as the archive.
 Binary `any-agents`, state in `~/.any-agents/` (`ANY_AGENTS_HOME`),
 env `ANY_AGENTS_ADDR`, `ANY_AGENTS_SPACE`, `ANY_AGENTS_RAG_MIN`,
 `ANY_AGENTS_TOOL`. The tool adapter owns the harness specifics: home
-dir (`CLAUDE_CONFIG_DIR` or `~/.claude`), config roots, memory dir,
+dir (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), config roots, memory dir,
 session env var, hook install and parsing. Config records are keyed
 `<tool>:<path>`. No secrets, no home-path fallbacks, no team-specific
 examples, no private eval set in the repo.

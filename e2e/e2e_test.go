@@ -207,6 +207,7 @@ func TestE2E(t *testing.T) {
 	t.Run("task_assignee_and_mine", testTaskAssignee)
 	t.Run("plan_collection_on_a_task_and_standalone", testPlans)
 	t.Run("session_note_summary_end_and_transcript", testSessionLifecycle)
+	t.Run("codex_joins_the_existing_install", testCodexInstall)
 	t.Run("collab_space_create_share_and_remove", testCollabSpace)
 	t.Run("collab_space_second_member_joins", testCollabMember)
 	t.Run("shared_memory_move_edit_push_and_mirror", testSharedMemory)
@@ -272,6 +273,53 @@ func TestE2E(t *testing.T) {
 		mustContain(t, apiMarkdown(t, ps.owner("app")), "## Recent releases", "status page lists releases")
 	})
 	t.Run("status_page_reflects_the_space", testStatusPage)
+}
+
+// Both harnesses use the same account and bridge home. Run the Codex
+// commands without ANY_AGENTS_ADDR to exercise desktop hook discovery
+// of the installed server as well as the real Any lifecycle.
+func testCodexInstall(t *testing.T) {
+	const sid = "e2ec0de0-1234-4567-8901-abcdef123456"
+	codexHome := filepath.Join(homeA, ".codex")
+	o := runOpts{extraEnv: []string{"CODEX_HOME=" + codexHome, "CODEX_THREAD_ID=" + sid, "ANY_AGENTS_ADDR="}}
+	ps := loadStateT(t, homeA).priv()
+	claudeFile := filepath.Join(toolHome(homeA), "settings.json")
+	before := readFile(t, claudeFile)
+	out, _ := runCLI(t, o, "install", "--tool", "codex")
+	mustContain(t, out, filepath.Join(codexHome, "hooks.json"), "Codex install destination")
+	mustEqual(t, readFile(t, claudeFile), before, "Claude settings after installing Codex")
+	mustEqual(t, loadStateT(t, homeA).Private, spaceId, "private space after installing Codex")
+	mustEqual(t, strOf(apiObject(t, ps.MachineObjectId), ps.owner("machine"), ps.prop("machine", "tools")), "claude codex", "machine tools")
+
+	hook := func(action string, fields map[string]any) string {
+		t.Helper()
+		fields["session_id"], fields["cwd"] = sid, projDir
+		event := o
+		event.stdin = mustJSON(fields)
+		out, stderr := runCLI(t, event, "hook", "--tool", "codex", action)
+		mustNotLogErrors(t, stderr, action)
+		return out
+	}
+	start := hook("session-start", map[string]any{"source": "startup"})
+	mustContain(t, start, "SessionStart", "Codex context envelope")
+	row := sessionRow(t, ps, sid)
+	mustEqual(t, choiceOf(row, ps.owner("session"), ps.prop("session", "tool")), "codex", "Codex session tool")
+
+	file := filepath.Join(codexHome, "AGENTS.md")
+	writeFile(t, file, "Codex project conventions.\n")
+	hook("post-tool", map[string]any{"tool_name": "apply_patch", "tool_input": map[string]string{"command": "*** Update File: " + file}})
+	rows := apiRecords(t, ps.owner("app"), ps.coll("config"), map[string]any{"tool": "codex"})
+	if len(rows) != 1 || rows[0]["body"] != "Codex project conventions.\n" {
+		t.Fatalf("Codex post-tool records: %v", rows)
+	}
+	transcript := filepath.Join(tmpRoot, "codex-transcript.jsonl")
+	writeFile(t, transcript, "{\"type\":\"session_meta\"}\n")
+	hook("session-end", map[string]any{"transcript_path": transcript})
+	row = sessionRow(t, ps, sid)
+	mustEqual(t, choiceOf(row, ps.owner("session"), ps.prop("session", "status")), "ended", "Codex session end")
+	output := filepath.Join(tmpRoot, "restored-codex-transcript.jsonl")
+	runCLI(t, o, "session", "transcript", "-o", output)
+	mustEqual(t, readFile(t, output), readFile(t, transcript), "Codex transcript")
 }
 
 // --- cleanup ---

@@ -99,7 +99,7 @@ func (st *State) save() error {
 	}
 	st.Version = stateVersion
 	b, _ := json.MarshalIndent(st, "", "  ")
-	return os.WriteFile(statePath(), b, 0o644)
+	return writePrivateFile(statePath(), b)
 }
 
 // space returns the cached space by id, or nil.
@@ -275,5 +275,22 @@ func (ss *SyncState) save() error {
 		return err
 	}
 	b, _ := json.MarshalIndent(ss, "", "  ")
-	return os.WriteFile(ss.path, b, 0o644)
+	return writePrivateFile(ss.path, b)
+}
+
+// Replace as one rename so a concurrent reader sees a complete file.
+func writePrivateFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".any-agents-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }

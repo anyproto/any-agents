@@ -69,12 +69,6 @@ func hookSessionEnd(tool Tool) {
 	}
 	sp := st.private()
 	defer flushStats(c, sp)
-	if err := pushMemory(c, sp, in.Cwd); err != nil {
-		recordErrorStat("push", err)
-	}
-	if err := pushConfig(c, sp); err != nil {
-		recordErrorStat("config push", err)
-	}
 	if in.SessionId != "" {
 		if _, err := sessionEnd(c, st, in.SessionId); err != nil {
 			recordErrorStat("session end", err)
@@ -88,6 +82,12 @@ func hookSessionEnd(tool Tool) {
 				}
 			}
 		}
+	}
+	if err := pushMemory(c, sp, in.Cwd); err != nil {
+		recordErrorStat("push", err)
+	}
+	if err := pushConfig(c, sp); err != nil {
+		recordErrorStat("config push", err)
 	}
 	_ = touchMachine(c, sp, "idle")
 	for _, s := range append([]*Space{sp}, st.collabs()...) {
