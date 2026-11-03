@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 const usage = `any-agents — shared context for coding agents, backed by any spaces
@@ -132,35 +131,52 @@ func cmdInstall(args []string) {
 	fs, _ := parseArgs("install", args, func(fs *flag.FlagSet) {
 		fs.String("tool", "", "install hooks for this harness (claude or codex)")
 		fs.Bool("create-space", false, "create the private space when this account does not have it yet")
-		fs.String("addr", "", "the any server's address when it is not the recorded one (host:port); pinned for every later call")
+		fs.String("addr", "", "pin the any server's address (host:port) for every later call; auto returns to discovery")
 	})
 	if name := fs.Lookup("tool").Value.String(); name != "" {
 		_ = os.Setenv("ANY_AGENTS_TOOL", name)
 	}
 	tool := currentTool()
-	addrFlag := fs.Lookup("addr").Value.String()
-	if addrFlag != "" {
-		resolvedAddr = addrFlag
-	}
-	c := NewClient()
-	if err := c.Health(); err != nil {
-		fatal(fmt.Errorf("any server not reachable at %s — the Any desktop app or `any run` serves it; when it listens elsewhere pass --addr host:port (the address is in the data dir's server.addr, `cat ~/.any/*/server.addr`)", c.base))
-	}
 	st, err := loadState()
 	if err != nil {
 		fatal(err)
 	}
-	// The address this install used is pinned: hooks and CLI calls from
-	// a desktop launch do not inherit the installer's environment.
+	// The address this install uses is pinned, in a file only the
+	// installer writes: hooks and CLI calls from a desktop launch do not
+	// inherit the installer's environment, and a pin outlives outages.
+	addrFlag := fs.Lookup("addr").Value.String()
 	switch env := os.Getenv("ANY_AGENTS_ADDR"); {
-	case addrFlag != "":
-		st.Addr = addrFlag
-	case env != "":
-		st.Addr = env
-	case st.Addr != "":
-		if _, ok := probeServer(st.Addr, 500*time.Millisecond); !ok {
-			st.Addr = "" // the pinned server is gone; discovery found this one
+	case addrFlag == "auto":
+		if err := clearPin(); err != nil {
+			fatal(err)
 		}
+		st.Addr = ""
+	case addrFlag != "":
+		if err := writePin(addrFlag); err != nil {
+			fatal(err)
+		}
+		st.Addr = ""
+	case env != "":
+		if err := writePin(env); err != nil {
+			fatal(err)
+		}
+		st.Addr = ""
+	case st.Addr != "": // a 0.3.0 pin moves to the pin file
+		if err := writePin(st.Addr); err != nil {
+			fatal(err)
+		}
+		st.Addr = ""
+	}
+	if err := st.save(); err != nil {
+		fatal(err)
+	}
+	c := NewClient()
+	if err := c.Health(); err != nil {
+		hint := "the Any desktop app or `any run` serves it; when it listens elsewhere pass --addr host:port (the address is in the data dir's server.addr, `cat ~/.any/*/server.addr`)"
+		if resolvedAddrSource == "pinned by install" {
+			hint = "this address is pinned by a previous install; pass --addr host:port to change it or --addr auto to discover the running server"
+		}
+		fatal(fmt.Errorf("any server not reachable at %s — %s", c.base, hint))
 	}
 	for _, sp := range st.Spaces {
 		sp.SetupVersion = 0 // force a full ensure everywhere, Collab included
@@ -179,7 +195,7 @@ func cmdInstall(args []string) {
 	if err := renderStatusPage(c, sp); err != nil {
 		fmt.Fprintf(os.Stderr, "any-agents: status page: %v\n", err)
 	}
-	fmt.Printf("installed\n  server   %s\n", strings.TrimPrefix(c.base, "http://"))
+	fmt.Printf("installed\n  server   %s (%s)\n", strings.TrimPrefix(c.base, "http://"), resolvedAddrSource)
 	fmt.Printf("  space    %s (%s)\n  app      %s\n  machine  %s\n  binary   %s\n  hooks    merged into %s\n",
 		sp.Name, sp.Id, globalLink(sp.Id, sp.owner("app")), globalLink(sp.Id, sp.MachineObjectId), bin, tool.HookFile())
 	if tool.Name() == "codex" {
@@ -228,7 +244,7 @@ func cmdStatus() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("server: %s\n", strings.TrimPrefix(c.base, "http://"))
+	fmt.Printf("server: %s (%s)\n", strings.TrimPrefix(c.base, "http://"), resolvedAddrSource)
 	b, _ := json.MarshalIndent(st, "", "  ")
 	fmt.Println(string(b))
 	if sp := st.private(); sp == nil || !sp.ready() {

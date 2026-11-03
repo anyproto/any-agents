@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -122,33 +123,80 @@ func pickServer(found []serverInfo, identity string) string {
 
 const defaultAddr = "127.0.0.1:2046"
 
-var resolvedAddr string
+// pinPath is the address `install` pinned: a file of its own, written
+// only by the installer, so no state round-trip of a hook can overwrite
+// it and a pin survives until the next install.
+func pinPath() string { return filepath.Join(stateDir(), "server-address") }
 
-// resolveAddr is the server address for this process: $ANY_AGENTS_ADDR,
-// else the address `install --addr` pinned when it still answers, else
-// the running server recorded by any, else the default.
+func readPin() (string, error) {
+	b, err := os.ReadFile(pinPath())
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func writePin(addr string) error {
+	if err := os.MkdirAll(stateDir(), 0o755); err != nil {
+		return err
+	}
+	tmp := pinPath() + ".tmp"
+	if err := os.WriteFile(tmp, []byte(addr+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, pinPath())
+}
+
+func clearPin() error {
+	if err := os.Remove(pinPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// chooseAddr is the precedence: the environment, else a pin (which stays
+// authoritative whether or not the server answers, so an outage never
+// redirects a machine to another account's server), else the one
+// running server discovery can attribute, else the default. found is
+// called only when nothing is pinned.
+func chooseAddr(env, pin, legacyPin string, found func() []serverInfo, identity string) (addr, source string) {
+	switch {
+	case env != "":
+		return env, "ANY_AGENTS_ADDR"
+	case pin != "":
+		return pin, "pinned by install"
+	case legacyPin != "":
+		return legacyPin, "pinned by install"
+	}
+	if addr := pickServer(found(), identity); addr != "" {
+		return addr, "discovered"
+	}
+	return defaultAddr, "default"
+}
+
+var resolvedAddr, resolvedAddrSource string
+
+// resolveAddr is the server address for this process, cached. A pin
+// file that cannot be read is fatal: guessing another server is worse
+// than stopping.
 func resolveAddr() string {
 	if resolvedAddr != "" {
 		return resolvedAddr
 	}
-	if v := os.Getenv("ANY_AGENTS_ADDR"); v != "" {
-		resolvedAddr = v
-		return v
+	pin, err := readPin()
+	if err != nil {
+		fatal(fmt.Errorf("pinned server address: %w", err))
 	}
-	identity := ""
+	identity, legacy := "", ""
 	if st, err := loadState(); err == nil {
-		identity = st.Identity
-		if st.Addr != "" {
-			if _, ok := probeServer(st.Addr, 500*time.Millisecond); ok {
-				resolvedAddr = st.Addr
-				return st.Addr
-			}
-		}
+		identity, legacy = st.Identity, st.Addr
+	} else {
+		fmt.Fprintf(os.Stderr, "any-agents: state: %v\n", err)
 	}
-	if addr := pickServer(discoverServers(anyDataRoot(), 500*time.Millisecond), identity); addr != "" {
-		resolvedAddr = addr
-		return addr
-	}
-	resolvedAddr = defaultAddr
-	return defaultAddr
+	resolvedAddr, resolvedAddrSource = chooseAddr(os.Getenv("ANY_AGENTS_ADDR"), pin, legacy,
+		func() []serverInfo { return discoverServers(anyDataRoot(), 500*time.Millisecond) }, identity)
+	return resolvedAddr
 }

@@ -52,8 +52,11 @@ make build && ./bin/any-agents install
 
 The server is the Any desktop app when it runs, else `any run`. Both
 record their address in the data dir's `server.addr`, and any-agents
-reads it, so no port needs configuring; `install --addr host:port` pins
-another address, `ANY_AGENTS_ADDR` overrides everything.
+reads it, so no port needs configuring. `install --addr host:port` pins
+an address in `~/.any-agents/server-address`, and so does an
+`ANY_AGENTS_ADDR` set during install; a pin stays authoritative, through
+outages too, until `install --addr auto` returns the machine to
+discovery. `ANY_AGENTS_ADDR` on a command overrides everything.
 
 `install` resolves or creates the private space (`--create-space` on
 the first machine), sets up the collections usecase, adopts or installs
@@ -173,7 +176,7 @@ and never marks the account's read state.
 ## Commands
 
 ```
-any-agents install [--tool claude|codex] [--create-space] [--addr HOST:PORT] | status | version
+any-agents install [--tool claude|codex] [--create-space] [--addr HOST:PORT|auto] | status | version
 any-agents pull [dir] [--allow-deletions] | push [dir]
 any-agents search <query> [-n N] [--json] [--space S]
 
