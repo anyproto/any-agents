@@ -507,7 +507,7 @@ func testInstall(t *testing.T) {
 	hooks, _ := settings["hooks"].(map[string]any)
 	for event, name := range map[string]string{
 		"SessionStart": "session-start", "SessionEnd": "session-end",
-		"PostToolUse": "post-tool", "UserPromptSubmit": "prompt",
+		"PostToolUse": "post-tool", "UserPromptSubmit": "prompt", "Stop": "stop",
 	} {
 		var ours []string
 		for _, c := range hookCommands(hooks[event]) {
@@ -1519,6 +1519,8 @@ func testCollabSpace(t *testing.T) {
 			t.Error("collab reopen kept resolvedAt")
 		}
 		runCLI(t, runOpts{sid: sidA}, "collab", "done", collabLink, "--met", "the suite passed twice")
+		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "wait", collabLink, "--timeout", "5s")
+		mustContain(t, out, "nothing more to wait for", "collab wait returns once the collab is closed")
 		row = apiObject(t, collabId, teamId)
 		mustEqual(t, choiceOf(row, c, ts.prop("collab", "status")), "done", "collab status after done")
 		if group(row, c)[ts.prop("collab", "resolvedAt")] == nil {
@@ -1627,10 +1629,28 @@ func testCollabMember(t *testing.T) {
 	// a helper cannot close another member's request; the requester can
 	reqM := filepath.Join(tmpRoot, "request-member.md")
 	writeFile(t, reqM, "# Member request\n\nFrom the second member.\n\n## Done when\n\nThe owner answers.\n")
-	out, _ = runCLI(t, runOpts{member: true}, "collab", "open", reqM, "--space", teamName)
-	memberCollab := "any://o/" + teamId + "/" + linkId(t, out)
+	out, _ = runCLI(t, runOpts{member: true}, "collab", "open", reqM, "--space", teamName, "--to", identity)
+	memberCollabId := linkId(t, out)
+	memberCollab := "any://o/" + teamId + "/" + memberCollabId
+	// the index row arrives before the object's tree: wait for a read
+	waitFor(t, 60*time.Second, "the member's collab to sync to the owner", func() bool {
+		_, _, err := execCLI(runOpts{sid: sidA}, "collab", "show", memberCollab)
+		return err == nil
+	})
 	_, errOut := runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "done", memberCollab, "--met", "not mine to close")
 	mustContain(t, errOut, "only the requester", "collab done by a helper")
+
+	// a reply from the other side holds the owner's agent once at Stop and
+	// is named on the next prompt, until the collab is read
+	runCLI(t, runOpts{member: true}, "collab", "say", memberCollab, "ping from the member")
+	waitFor(t, 60*time.Second, "the member's reply to sync to the owner", func() bool {
+		return len(apiRecordsIn(t, teamId, memberCollabId, "chat_messages", nil)) > 0
+	})
+	mustEqual(t, stopHook(t, sidA, true), "", "stop hook while already active")
+	mustContain(t, stopHook(t, sidA, false), "Member request", "stop hook blocks on an unread reply")
+	mustContain(t, promptHook(t, sidA, "what should I look at next in this repository today"), "unread replies", "prompt hook names the unread reply")
+	runCLI(t, runOpts{sid: sidA}, "collab", "show", memberCollab)
+	mustEqual(t, stopHook(t, sidA, false), "", "stop hook after the reply was read")
 	runCLI(t, runOpts{member: true}, "collab", "cancel", memberCollab, "--met", "e2e over")
 	out, _ = runCLI(t, runOpts{member: true}, "collab", "show", memberCollab)
 	mustContain(t, out, "Canceled: e2e over", "collab cancel posts the reason")
@@ -3002,4 +3022,24 @@ func wantSetupVersion(t *testing.T) int {
 	}
 	n, _ := strconv.Atoi(string(m[1]))
 	return n
+}
+
+// stopHook pipes a Stop payload and returns the block reason ("" when
+// the hook let the agent stop).
+func stopHook(t *testing.T, sessionId string, active bool) string {
+	t.Helper()
+	in := map[string]any{"session_id": sessionId, "cwd": projDir, "stop_hook_active": active}
+	out, _ := runCLI(t, runOpts{stdin: mustJSON(in)}, "hook", "--tool", "claude", "stop")
+	if strings.TrimSpace(out) == "" {
+		return ""
+	}
+	var h struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(out), &h); err != nil {
+		t.Fatalf("hook stop output: %v\n%s", err, out)
+	}
+	mustEqual(t, h.Decision, "block", "stop hook decision")
+	return h.Reason
 }
