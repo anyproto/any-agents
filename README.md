@@ -46,9 +46,14 @@ Per machine:
 
 ```
 any init --mnemonic        # same phrase on every machine; NEVER copy wallet.key
-any run                    # local any server, 127.0.0.1:2046 by default
+any run                    # only without the Any desktop app: the app already runs the server
 make build && ./bin/any-agents install
 ```
+
+The server is the Any desktop app when it runs, else `any run`. Both
+record their address in the data dir's `server.addr`, and any-agents
+reads it, so no port needs configuring; `install --addr host:port` pins
+another address, `ANY_AGENTS_ADDR` overrides everything.
 
 `install` resolves or creates the private space (`--create-space` on
 the first machine), sets up the collections usecase, adopts or installs
@@ -135,7 +140,7 @@ and never marks the account's read state.
 ## Commands
 
 ```
-any-agents install [--create-space] | status | version
+any-agents install [--create-space] [--addr HOST:PORT] | status | version
 any-agents pull [dir] [--allow-deletions] | push [dir]
 any-agents search <query> [-n N] [--json] [--space S]
 
@@ -163,7 +168,8 @@ Aliases: `save` = `doc add`, `prompt …` = `task …`, `scratch append|show`
 link names its space. Listings print `any://o/<space>/<id>` links that
 open in any-ui.
 
-Env: `ANY_AGENTS_ADDR` (`127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
+Env: `ANY_AGENTS_ADDR` (default: the running server recorded in
+`~/.any/*/server.addr`, else `127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
 the private space name), `ANY_AGENTS_RAG_MIN` (`0.030`), `ANY_AGENTS_TOOL`
 (`claude`), `ANY_AGENTS_HOME` (`~/.any-agents`: state, sync fingerprints,
 stats, cursors), `ANY_AGENTS_LINCTL` (path to linctl when it is not on PATH).

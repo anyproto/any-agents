@@ -16,7 +16,7 @@ member who starts fresh.
 | team spaces | none | collab spaces, e.g. "Team Agents" |
 | state dir | `~/.claude/any-claude/` | `~/.any-agents/` (`ANY_AGENTS_HOME`) |
 | env prefix | `ANY_CLAUDE_*` | `ANY_AGENTS_*` |
-| server address | `127.0.0.1:7001` | `127.0.0.1:2046` (any's default since any#295) |
+| server address | `127.0.0.1:7001` | found from `server.addr` (the desktop app or `any run`); `install --addr` pins one |
 | hooks | four any-claude hooks | four any-agents hooks; `install` drops the any-claude ones |
 | commands | `doc`, `task`, `plan`, `session`, `search`, … | the same, plus `--space S` on most of them, `memory share`, `collab`, `space` |
 
@@ -31,9 +31,13 @@ Humans read and write them in any-ui and the native clients.
   module open to client types). An older server can still join a team
   space and talk in collabs, but cannot open one; `install` says so and
   adopts the Collab bundle from the registry instead of registering it.
-- The any server listening on `127.0.0.1:2046`. If yours is elsewhere,
-  export `ANY_AGENTS_ADDR=host:port` for the shell and put the same value
-  in the `env` block of `~/.claude/settings.json` so the hooks see it.
+- A running any server. On a Mac that is the Any desktop app, which
+  runs the server for you: do not start `any run` next to it. Without
+  the app, `any run`. Either way the server records its address in the
+  data dir's `server.addr` and any-agents finds it; only when the app
+  listens somewhere any-agents cannot see, pin it with
+  `any-agents install --addr host:port` (ask for the port, or read
+  `~/.any/*/server.addr`).
 - Go, to build both binaries.
 - A clone of anyproto/any-agents and the any-claude checkout that has
   `migrate --to` (branch `feat/migrate-to-any-agents` of
@@ -138,7 +142,7 @@ adopts the bundles (a writer installs what is missing). Afterwards:
 ## Step 6: other machines
 
 Same account, same mnemonic (`any init --mnemonic`, never copy
-`wallet.key`), then:
+`wallet.key`; with the desktop app, sign in there), then:
 
 ```
 git pull --ff-only && make build && bin/any-agents install   # in the any-agents clone

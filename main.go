@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const usage = `any-agents — shared context for coding agents, backed by any spaces
@@ -36,7 +38,7 @@ const usage = `any-agents — shared context for coding agents, backed by any sp
 
 Ids accept an object id or an any://o/<space>/<id> link; a link names its space.
 Aliases: save = doc add · prompt = task · scratch append|show = session note|show
-Env: ANY_AGENTS_ADDR (127.0.0.1:2046), ANY_AGENTS_SPACE (Agents), ANY_AGENTS_RAG_MIN (0.030), ANY_AGENTS_TOOL (claude), ANY_AGENTS_HOME (~/.any-agents)
+Env: ANY_AGENTS_ADDR (default: the running server recorded in ~/.any/*/server.addr, else 127.0.0.1:2046), ANY_AGENTS_SPACE (Agents), ANY_AGENTS_RAG_MIN (0.030), ANY_AGENTS_TOOL (claude), ANY_AGENTS_HOME (~/.any-agents)
 `
 
 func main() {
@@ -129,14 +131,26 @@ func main() {
 func cmdInstall(args []string) {
 	fs, _ := parseArgs("install", args, func(fs *flag.FlagSet) {
 		fs.Bool("create-space", false, "create the private space when this account does not have it yet")
+		fs.String("addr", "", "the any server's address when it is not the recorded one (host:port); pinned for every later call")
 	})
+	addrFlag := fs.Lookup("addr").Value.String()
+	if addrFlag != "" {
+		resolvedAddr = addrFlag
+	}
 	c := NewClient()
 	if err := c.Health(); err != nil {
-		fatal(fmt.Errorf("any server not reachable at %s — start it with `any run`", c.base))
+		fatal(fmt.Errorf("any server not reachable at %s — the Any desktop app or `any run` serves it; when it listens elsewhere pass --addr host:port (the address is in the data dir's server.addr, `cat ~/.any/*/server.addr`)", c.base))
 	}
 	st, err := loadState()
 	if err != nil {
 		fatal(err)
+	}
+	if addrFlag != "" {
+		st.Addr = addrFlag
+	} else if st.Addr != "" && os.Getenv("ANY_AGENTS_ADDR") == "" {
+		if _, ok := probeServer(st.Addr, 500*time.Millisecond); !ok {
+			st.Addr = "" // the pinned server is gone; discovery found this one
+		}
 	}
 	for _, sp := range st.Spaces {
 		sp.SetupVersion = 0 // force a full ensure everywhere, Collab included
@@ -156,7 +170,8 @@ func cmdInstall(args []string) {
 	if err := renderStatusPage(c, sp); err != nil {
 		fmt.Fprintf(os.Stderr, "any-agents: status page: %v\n", err)
 	}
-	fmt.Printf("installed\n  space    %s (%s)\n  app      %s\n  machine  %s\n  binary   %s\n  hooks    merged into %s\n",
+	fmt.Printf("installed\n  server   %s\n", strings.TrimPrefix(c.base, "http://"))
+	fmt.Printf("  space    %s (%s)\n  app      %s\n  machine  %s\n  binary   %s\n  hooks    merged into %s\n",
 		sp.Name, sp.Id, globalLink(sp.Id, sp.owner("app")), globalLink(sp.Id, sp.MachineObjectId), bin, filepath.Join(tool.Home(), "settings.json"))
 	if !sp.has("collab") {
 		fmt.Println("  collabs  off (the server reserves the chat module)")
@@ -201,6 +216,7 @@ func cmdStatus() {
 	if err != nil {
 		fatal(err)
 	}
+	fmt.Printf("server: %s\n", strings.TrimPrefix(c.base, "http://"))
 	b, _ := json.MarshalIndent(st, "", "  ")
 	fmt.Println(string(b))
 	if sp := st.private(); sp == nil || !sp.ready() {

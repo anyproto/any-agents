@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -20,11 +19,7 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	addr := os.Getenv("ANY_AGENTS_ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:2046"
-	}
-	return &Client{base: "http://" + addr, hc: &http.Client{Timeout: 90 * time.Second}}
+	return &Client{base: "http://" + resolveAddr(), hc: &http.Client{Timeout: 90 * time.Second}}
 }
 
 type apiError struct {

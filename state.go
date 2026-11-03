@@ -52,6 +52,7 @@ type State struct {
 	Identity      string            `json:"identity,omitempty"` // own account id
 	TechSpaceId   string            `json:"techSpaceId,omitempty"`
 	Private       string            `json:"private,omitempty"` // private space id
+	Addr          string            `json:"addr,omitempty"`    // server pinned by install --addr
 	Spaces        map[string]*Space `json:"spaces,omitempty"`
 	LastSessionId string            `json:"lastSessionId,omitempty"`
 }
