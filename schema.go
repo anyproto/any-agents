@@ -9,7 +9,7 @@ package main
 // property carries xFormat.pos so columns render in declaration order.
 
 const (
-	version      = "0.3.0"
+	version      = "0.4.0"
 	setupVersion = 3 // bump to force a full re-ensure on every machine
 
 	bundleApp     = "agents/v1"
