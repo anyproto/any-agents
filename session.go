@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -67,8 +68,13 @@ func sessionStart(c *Client, st *State, tool Tool, sessionId, cwd, source string
 			return "", err
 		}
 	}
-	st.LastSessionId = sessionId
-	if err := st.save(); err != nil {
+	if tool.Name() == "claude" {
+		st.LastSessionId = sessionId // retain the pre-Codex on-disk format
+		err = st.save()
+	} else {
+		err = writePrivateFile(filepath.Join(stateDir(), "last-session-"+tool.Name()), []byte(sessionId))
+	}
+	if err != nil {
 		return "", err
 	}
 	// Open tasks are not announced here on purpose: the agent would ask
@@ -84,6 +90,9 @@ func sessionStart(c *Client, st *State, tool Tool, sessionId, cwd, source string
 		"`any-agents task list|show|done` handles the queue; `any-agents plan add <taskId> <file|->` records a plan on a task; " +
 		"`any-agents collab open|list|show|join|say|wait|done` asks other members' agents for help or helps them; " +
 		"`any-agents feedback \"…\" --kind memory-wrong --ref <id>` reports a stale memory.\n")
+	if tool.Name() == "codex" {
+		fmt.Fprintf(&b, "Project memory files: %s (MEMORY.md lists the mirrored entries).\n", tool.MemoryDir(cwd))
+	}
 	return b.String(), nil
 }
 

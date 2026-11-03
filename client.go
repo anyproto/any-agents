@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -15,16 +16,28 @@ import (
 // Client is the thin HTTP layer over the local any server. Every method
 // maps 1:1 onto one route; shapes follow any's docs/03-api.md.
 type Client struct {
-	base string
-	hc   *http.Client
+	base    string
+	hc      *http.Client
+	initErr error
 }
 
 func NewClient() *Client {
 	addr := os.Getenv("ANY_AGENTS_ADDR")
+	var err error
 	if addr == "" {
-		addr = "127.0.0.1:2046"
+		var b []byte
+		b, err = os.ReadFile(filepath.Join(stateDir(), "server-address"))
+		switch {
+		case os.IsNotExist(err):
+			addr, err = "127.0.0.1:2046", nil
+		case err == nil:
+			addr = strings.TrimSpace(string(b))
+			if addr == "" {
+				err = fmt.Errorf("empty installed server-address")
+			}
+		}
 	}
-	return &Client{base: "http://" + addr, hc: &http.Client{Timeout: 90 * time.Second}}
+	return &Client{base: "http://" + addr, hc: &http.Client{Timeout: 90 * time.Second}, initErr: err}
 }
 
 type apiError struct {
@@ -45,6 +58,9 @@ func isCode(err error, code string) bool {
 }
 
 func (c *Client) do(method, path string, in, out any) error {
+	if c.initErr != nil {
+		return c.initErr
+	}
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)

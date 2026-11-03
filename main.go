@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const usage = `any-agents — shared context for coding agents, backed by any spaces
 
-  install [--create-space]     resolve or create the private space + bundles, copy the binary, merge the tool's hooks
+  install [--tool claude|codex] [--create-space]     resolve or create the private space + bundles, copy the binary, merge the tool's hooks
   status | version             show state / versions
   pull [dir] [--allow-deletions]   mirror memories + config down     (session-start hook)
   push [dir]                   mirror memories + config up            (session-end / post-tool hooks)
@@ -32,7 +33,7 @@ const usage = `any-agents — shared context for coding agents, backed by any sp
   project list | show <scope> [--space S]      machine list
   linear list [--all] | show <KEY> | sync [KEY…]      Linear issue objects (enriched via linctl)
   stats [project] [--global] [--days N]     feedback <text> [--kind K] [--ref ID]     gc [--apply]     eval [--golden FILE]
-  hook [--tool T] session-start|session-end|post-tool|prompt
+  hook [--tool T] session-start|session-end|post-tool|prompt|stop
 
 Ids accept an object id or an any://o/<space>/<id> link; a link names its space.
 Aliases: save = doc add · prompt = task · scratch append|show = session note|show
@@ -128,11 +129,16 @@ func main() {
 
 func cmdInstall(args []string) {
 	fs, _ := parseArgs("install", args, func(fs *flag.FlagSet) {
+		fs.String("tool", "", "install hooks for this harness (claude or codex)")
 		fs.Bool("create-space", false, "create the private space when this account does not have it yet")
 	})
+	if name := fs.Lookup("tool").Value.String(); name != "" {
+		_ = os.Setenv("ANY_AGENTS_TOOL", name)
+	}
+	tool := currentTool()
 	c := NewClient()
 	if err := c.Health(); err != nil {
-		fatal(fmt.Errorf("any server not reachable at %s — start it with `any run`", c.base))
+		fatal(fmt.Errorf("any server not reachable at %s: %w", c.base, err))
 	}
 	st, err := loadState()
 	if err != nil {
@@ -148,8 +154,12 @@ func cmdInstall(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	tool := currentTool()
-	if err := tool.InstallHooks(bin); err != nil {
+	if err := installHooks(tool, bin); err != nil {
+		fatal(err)
+	}
+	// Hooks and subsequent CLI invocations may run in a desktop process
+	// that did not inherit the installer's ANY_AGENTS_ADDR.
+	if err := writePrivateFile(filepath.Join(stateDir(), "server-address"), []byte(strings.TrimPrefix(c.base, "http://")+"\n")); err != nil {
 		fatal(err)
 	}
 	sp := st.private()
@@ -157,7 +167,10 @@ func cmdInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "any-agents: status page: %v\n", err)
 	}
 	fmt.Printf("installed\n  space    %s (%s)\n  app      %s\n  machine  %s\n  binary   %s\n  hooks    merged into %s\n",
-		sp.Name, sp.Id, globalLink(sp.Id, sp.owner("app")), globalLink(sp.Id, sp.MachineObjectId), bin, filepath.Join(tool.Home(), "settings.json"))
+		sp.Name, sp.Id, globalLink(sp.Id, sp.owner("app")), globalLink(sp.Id, sp.MachineObjectId), bin, tool.HookFile())
+	if tool.Name() == "codex" {
+		fmt.Println("  next     review the five any-agents commands in Codex /hooks")
+	}
 	if !sp.has("collab") {
 		fmt.Println("  collabs  off (the server reserves the chat module)")
 	}
@@ -195,7 +208,7 @@ func installBinary() (string, error) {
 func cmdStatus() {
 	c := NewClient()
 	if err := c.Health(); err != nil {
-		fatal(fmt.Errorf("any server not reachable at %s", c.base))
+		fatal(fmt.Errorf("any server not reachable at %s: %w", c.base, err))
 	}
 	st, err := loadState()
 	if err != nil {
