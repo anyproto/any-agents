@@ -28,6 +28,7 @@ type Tool interface {
 	InstallHooks(bin string) error
 	ParseHookInput(r io.Reader) *hookInput
 	EmitContext(event, ctx string)
+	EmitBlock(reason string) // Stop hook: keep the agent working, with the reason
 }
 
 var tools = map[string]func() Tool{"claude": func() Tool { return &claudeTool{} }}
@@ -57,6 +58,7 @@ type hookInput struct {
 	FilePath       string // file-tool edits
 	Command        string // shell-tool commands
 	Prompt         string
+	StopHookActive bool // a Stop hook already held this turn once
 }
 
 // --- Claude Code ---
@@ -126,12 +128,13 @@ func (t *claudeTool) ParseHookInput(r io.Reader) *hookInput {
 			FilePath string `json:"file_path"`
 			Command  string `json:"command"`
 		} `json:"tool_input"`
-		Prompt string `json:"prompt"`
+		Prompt         string `json:"prompt"`
+		StopHookActive bool   `json:"stop_hook_active"`
 	}
 	b, _ := io.ReadAll(r)
 	_ = json.Unmarshal(b, &in)
 	h := &hookInput{SessionId: in.SessionId, TranscriptPath: in.TranscriptPath, Cwd: in.Cwd, Source: in.Source,
-		ToolName: in.ToolName, FilePath: in.ToolInput.FilePath, Command: in.ToolInput.Command, Prompt: in.Prompt}
+		ToolName: in.ToolName, FilePath: in.ToolInput.FilePath, Command: in.ToolInput.Command, Prompt: in.Prompt, StopHookActive: in.StopHookActive}
 	if h.Cwd == "" {
 		h.Cwd, _ = os.Getwd()
 	}
@@ -141,6 +144,10 @@ func (t *claudeTool) ParseHookInput(r io.Reader) *hookInput {
 func (t *claudeTool) EmitContext(event, ctx string) {
 	out := map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": event, "additionalContext": ctx}}
 	_ = json.NewEncoder(os.Stdout).Encode(out)
+}
+
+func (t *claudeTool) EmitBlock(reason string) {
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"decision": "block", "reason": reason})
 }
 
 // InstallHooks merges the bridge's hooks into settings.json, preserving
@@ -182,6 +189,7 @@ func (t *claudeTool) InstallHooks(bin string) error {
 	set("SessionEnd", "", cmd+"session-end", 120)
 	set("PostToolUse", "Write|Edit|MultiEdit|NotebookEdit|Bash", cmd+"post-tool", 0)
 	set("UserPromptSubmit", "", cmd+"prompt", 0)
+	set("Stop", "", cmd+"stop", 30)
 	raw["hooks"] = hooks
 	b, _ := json.MarshalIndent(raw, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {

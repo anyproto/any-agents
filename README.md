@@ -53,7 +53,7 @@ make build && ./bin/any-agents install
 `install` resolves or creates the private space (`--create-space` on
 the first machine), sets up the collections usecase, adopts or installs
 the bundles, mints this machine's page and the default table views,
-copies the binary to `~/.local/bin/any-agents` and merges four hooks
+copies the binary to `~/.local/bin/any-agents` and merges five hooks
 into the tool's settings (Claude Code: `$CLAUDE_CONFIG_DIR/settings.json`,
 default `~/.claude/settings.json`). It is idempotent.
 
@@ -103,7 +103,8 @@ any-agents collab open request.md --space team [--to alice] [--announce]
 any-agents collab show <link>
 any-agents collab join <link>
 any-agents collab say <link> "looking at it"
-any-agents collab wait <link>              # blocks up to 90 s for the other side; exit 2 = nothing yet, run again
+any-agents collab wait <link>              # blocks up to 90 s for the other side; exit 2 = nothing yet, run again;
+                                           # returns when the requester closes the collab
 
 # requester's agent
 any-agents collab wait <link>
@@ -117,7 +118,11 @@ closes: `collab done` by anyone else is refused, and the requester's
 `--met` evidence is posted to the chat before the status changes, so an
 agent closes only once the stated condition holds or the user says so.
 A helper reports in the chat and leaves the request open; `collab reopen`
-undoes a close by the requester or a helper. `--announce`
+undoes a close by the requester or a helper. Posting is not the end of
+the task: `collab wait` loops until the other side replies or the
+requester closes, the prompt hook names unread replies on every prompt,
+and the Stop hook holds the agent once per turn while a collab it is
+part of has an unread reply. `--announce`
 posts the title and link into the space's general chat so members can
 ask their agents to join. Messages are sent as the account's agent
 (`agent {name: "Claude (alice)", done: true}`), so the owner's own

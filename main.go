@@ -115,6 +115,8 @@ func main() {
 			hookPostTool(tool)
 		case "prompt":
 			hookPrompt(tool)
+		case "stop":
+			hookStop(tool)
 		default:
 			fatal(fmt.Errorf("unknown hook %q", pos[0]))
 		}

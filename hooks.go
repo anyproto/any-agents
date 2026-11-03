@@ -169,16 +169,20 @@ func hookPostTool(tool Tool) {
 // the same record.
 func hookPrompt(tool Tool) {
 	in := tool.ParseHookInput(os.Stdin)
-	prompt := strings.TrimSpace(in.Prompt)
-	if len(prompt) < 20 || len(strings.Fields(prompt)) < 4 ||
-		strings.HasPrefix(prompt, "/") || strings.HasPrefix(prompt, "!") {
-		return
-	}
 	st, err := loadState()
 	if err != nil || st.private() == nil || !st.private().ready() {
 		return
 	}
 	c := hookClient()
+	prompt := strings.TrimSpace(in.Prompt)
+	notice := unreadCollabNotice(c, st)
+	if len(prompt) < 20 || len(strings.Fields(prompt)) < 4 ||
+		strings.HasPrefix(prompt, "/") || strings.HasPrefix(prompt, "!") {
+		if notice != "" {
+			tool.EmitContext("UserPromptSubmit", notice)
+		}
+		return
+	}
 	seen := loadRagSeen(in.SessionId)
 	type hit struct {
 		sp *Space
@@ -212,6 +216,9 @@ func hookPrompt(tool Tool) {
 		picked = append(picked, r...)
 	}
 	if len(picked) == 0 {
+		if notice != "" {
+			tool.EmitContext("UserPromptSubmit", notice)
+		}
 		return
 	}
 	sort.SliceStable(picked, func(i, j int) bool { return picked[i].h.Score > picked[j].h.Score })
@@ -230,7 +237,63 @@ func hookPrompt(tool Tool) {
 	}
 	saveRagSeen(in.SessionId, seen)
 	bumpStat("ragInjected", len(picked))
+	if notice != "" {
+		b.WriteString("\n" + notice)
+	}
 	tool.EmitContext("UserPromptSubmit", b.String())
+}
+
+// unreadCollabNotice names the open collabs I am part of that have
+// messages this machine has not read, or "". It nags on every prompt
+// until `collab show` or `collab wait` advances the cursor.
+func unreadCollabNotice(c *Client, st *State) string {
+	var items []string
+	for _, sp := range st.collabs() {
+		if !sp.ready() || !sp.has("collab") {
+			continue
+		}
+		rows, err := objectsOf(c, sp, "collab", []string{"-" + propPath(sp, "collab", "date")},
+			map[string]any{propPath(sp, "collab", "status"): map[string]any{"$in": collabOpen}})
+		if err != nil {
+			continue
+		}
+		t := sp.owner("collab")
+		for _, r := range rows {
+			requester := firstMember(r, t, sp.prop("collab", "requester"))
+			if requester != st.me() && !contains(membersOf(r, t, sp.prop("collab", "assignees")), st.me()) {
+				continue
+			}
+			id, _ := r["id"].(string)
+			if n := newMessageCount(c, st, sp, id, 10); n > 0 {
+				role := "helper"
+				if requester == st.me() {
+					role = "requester"
+				}
+				items = append(items, fmt.Sprintf("%q +%d (you are the %s) %s", nameOf(r), n, role, globalLink(sp.Id, id)))
+			}
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	return "any-agents: unread replies on collab(s) you are part of: " + strings.Join(items, "; ") +
+		" — read with `any-agents collab show <link>`, answer with `collab say`, then keep `collab wait <link>` running until the requester closes it (as the requester: `collab done <link> --met \"<evidence>\"` once the definition of done holds).\n"
+}
+
+// hookStop holds the agent once per turn when a collab it is part of
+// has an unread reply, so posting an answer is not the end of the task.
+func hookStop(tool Tool) {
+	in := tool.ParseHookInput(os.Stdin)
+	if in.StopHookActive {
+		return
+	}
+	st, err := loadState()
+	if err != nil || st.private() == nil || !st.private().ready() {
+		return
+	}
+	if notice := unreadCollabNotice(hookClient(), st); notice != "" {
+		tool.EmitBlock(strings.TrimSpace(notice))
+	}
 }
 
 func ragMinScore() float64 {

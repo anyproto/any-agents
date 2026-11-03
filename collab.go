@@ -174,11 +174,16 @@ func cmdCollab(args []string) {
 			if err := collabSay(c, st, sp, id, text); err != nil {
 				fatal(err)
 			}
+			fmt.Fprintf(os.Stderr, "any-agents: posted; now `any-agents collab wait %s` for the reply (exit 2 = none yet, run it again) until the requester closes the collab\n", globalLink(sp.Id, id))
 		case "wait":
 			timeout, _ := time.ParseDuration(fs.Lookup("timeout").Value.String())
-			msgs, err := collabWait(c, st, sp, id, timeout, fs.Lookup("all").Value.String() == "true")
+			msgs, closedAs, err := collabWait(c, st, sp, id, timeout, fs.Lookup("all").Value.String() == "true")
 			if err != nil {
 				fatal(err)
+			}
+			if closedAs != "" {
+				fmt.Printf("collab %s — nothing more to wait for\n", closedAs)
+				return
 			}
 			if len(msgs) == 0 {
 				fmt.Fprintln(os.Stderr, "any-agents: no reply within the timeout")
@@ -432,8 +437,19 @@ func collabSay(c *Client, st *State, sp *Space, id, text string) error {
 
 // collabWait polls the chat until a message newer than the cursor
 // arrives (by default one that is not mine), or the timeout passes.
-func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duration, all bool) ([]map[string]any, error) {
+func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duration, all bool) ([]map[string]any, string, error) {
 	deadline := time.Now().Add(timeout)
+	closed := func() string {
+		row, err := c.GetObject(sp.Id, id)
+		if err != nil {
+			return ""
+		}
+		switch s := choiceOf(row, sp.owner("collab"), sp.prop("collab", "status")); s {
+		case "done", "canceled":
+			return s
+		}
+		return ""
+	}
 	if _, ok := loadCursor(id); !ok {
 		// No cursor on this machine: the backlog is `collab show`'s job;
 		// wait starts from now. A collab opened here has an empty cursor
@@ -448,7 +464,7 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		cursor, _ := loadCursor(id)
 		msgs, err := chatSince(c, sp, id, cursor, 50)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		var out []map[string]any
 		for _, m := range msgs {
@@ -460,10 +476,13 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 			saveCursor(id, verOf(msgs[len(msgs)-1]))
 		}
 		if len(out) > 0 {
-			return out, nil
+			return out, "", nil
+		}
+		if s := closed(); s != "" {
+			return nil, s, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, nil
+			return nil, "", nil
 		}
 		time.Sleep(2 * time.Second)
 	}
