@@ -92,6 +92,12 @@ func spaceOf(st *State, flag string) *Space {
 	if err != nil {
 		fatal(err)
 	}
+	// A collab space set up by an older binary catches up on first use.
+	if sp.Kind == kindCollab && sp.SetupVersion != setupVersion {
+		if err := ensureSpaceSetup(NewClient(), sp); err != nil {
+			fmt.Fprintf(os.Stderr, "any-agents: %s: setup: %v\n", sp.Name, err)
+		}
+	}
 	return sp
 }
 

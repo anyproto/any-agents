@@ -129,7 +129,8 @@ func ensureSpaceSetup(c *Client, sp *Space) error {
 	if err := ensureUsecases(c, sp); err != nil {
 		return err
 	}
-	if err := ensureBundles(c, sp); err != nil {
+	complete, err := ensureBundles(c, sp)
+	if err != nil {
 		return err
 	}
 	if sp.Kind == kindPrivate {
@@ -141,7 +142,11 @@ func ensureSpaceSetup(c *Client, sp *Space) error {
 		fmt.Fprintf(os.Stderr, "any-agents: views: %v\n", err) // cosmetic, never fatal
 	}
 	_ = c.RegisterApp("any-agents", version)
-	sp.SetupVersion = setupVersion
+	// A schema this member could not complete (a reader waiting for a
+	// writer's property) is re-checked next time.
+	if complete {
+		sp.SetupVersion = setupVersion
+	}
 	return sp.save()
 }
 
@@ -174,9 +179,10 @@ func ensureUsecases(c *Client, sp *Space) error {
 // ensureBundles adopts-or-installs the bundles and caches rootId, xKey →
 // propId and part storage collections for each. Collab is skipped on a
 // server that still reserves the chat module.
-func ensureBundles(c *Client, sp *Space) error {
+func ensureBundles(c *Client, sp *Space) (complete bool, err error) {
 	drafts := bundleDrafts()
 	waited := false
+	complete = true
 	for _, name := range bundleNames {
 		bs := sp.bundle(name)
 		if bs.RootId != "" && len(bs.Props) >= len(drafts[name].Properties) && sp.SetupVersion == setupVersion {
@@ -200,7 +206,7 @@ func ensureBundles(c *Client, sp *Space) error {
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("bundle %s: %w", drafts[name].Id, err)
+			return false, fmt.Errorf("bundle %s: %w", drafts[name].Id, err)
 		}
 		bs.RootId = b.RootId
 		var props []PropertyInfo
@@ -210,7 +216,7 @@ func ensureBundles(c *Client, sp *Space) error {
 			props, err = c.ListProperties(sp.Id, b.RootId)
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		bs.Props = map[string]string{}
 		for _, p := range props {
@@ -230,7 +236,8 @@ func ensureBundles(c *Client, sp *Space) error {
 				pid, err = c.AddProperty(sp.Id, b.RootId, d)
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "any-agents: %s: property %s: %v\n", drafts[name].Id, d.XKey, err)
+				fmt.Fprintf(os.Stderr, "any-agents: %s: property %s not added (%v); a writer's any-agents adds it, this machine retries\n", drafts[name].Id, d.XKey, err)
+				complete = false
 				continue
 			}
 			bs.Props[d.XKey] = pid
@@ -238,7 +245,7 @@ func ensureBundles(c *Client, sp *Space) error {
 		var parts []PartInfo
 		if !collectionBundles[name] {
 			if parts, err = c.ListParts(sp.Id, b.RootId); err != nil {
-				return err
+				return false, err
 			}
 		}
 		bs.Collections = map[string]string{}
@@ -259,10 +266,10 @@ func ensureBundles(c *Client, sp *Space) error {
 			}
 		}
 		if err := sp.save(); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return complete, nil
 }
 
 // ensureMachine resolves this host's Machine object and stamps liveness.

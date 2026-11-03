@@ -10,7 +10,7 @@ package main
 
 const (
 	version      = "0.1.0"
-	setupVersion = 1 // bump to force a full re-ensure on every machine
+	setupVersion = 2 // bump to force a full re-ensure on every machine
 
 	bundleApp     = "agents/v1"
 	bundleProject = "agents-project/v1"
