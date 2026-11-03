@@ -27,7 +27,8 @@ Design: [docs/design.md](docs/design.md).
 | **Doc** | a saved page: report, spec, note, retro, plan text | `any-agents doc add`, or a human writing a page |
 | **Task** | a Doc filed under Task: the prompt queue, with assignee, priority, due and a Linear key | `any-agents task add`, or a human filing a page under Task |
 | **Plan** | a Doc filed under Plan: draft / approved / done | `any-agents plan add <taskId>` |
-| **Collab** | a help request between agents: body + chat, status request / in progress / done / canceled | `any-agents collab open` in a collab space |
+| **Collab** | a help request between agents: body + chat, status request / in progress / done / canceled, PR link | `any-agents collab open` in a collab space |
+| **Release** | one page per shipped version of a project: version, date, URL, breaking, API changes, bundled releases; the notes as the body | `any-agents release add`, or a human filing a page under Release |
 | **Session** | one page per agent session; body = scratch notes; transcript attached | session hooks, `any-agents session note`; `session share` copies one into a collab space |
 | **Project** | one page per repo, converged across machines and members | created on first sight |
 | **Machine** | one per host, private space only | created on install |
@@ -123,7 +124,7 @@ any-agents install [--create-space] | status | version
 any-agents pull [dir] [--allow-deletions] | push [dir]
 any-agents search <query> [-n N] [--json] [--space S]
 
-any-agents doc  add <file|->  [--title T] [--kind K] [--project P] [--linear L] [--related ID,…] [--new] [--space S]
+any-agents doc  add <file|->  [--title T] [--kind K] [--project P] [--linear L] [--pr URL] [--related ID,…] [--new] [--space S]
 any-agents doc  list [--kind K] [--project P] [--all] [--space S] | show <id> | append <id> <text|file|-> | edit <id> --old S --new S
 any-agents doc  archive <id> | link <id> <objectId>
 any-agents task add <file|->  [--title T] [--project P] [--priority low|normal|high] [--assignee M] [--target HOST] [--space S]
@@ -131,9 +132,11 @@ any-agents task list [--all] [--mine] [--project P] [--space S] | show <id> | st
 any-agents plan add [<taskId>] <file|-> [--status draft|approved] [--replace] | list [--all] | show <id> | approve <id> | done <id>
 any-agents session note <text|file|-> | show | update [--summary S] [--title T] [--linear KEYS] | list [--project P] [--space S] | transcript [-o FILE]
 any-agents session share --space S [--transcript]
-any-agents collab open <file|-> --space S [--title T] [--to M,…] [--project P] [--linear L] [--announce]
+any-agents collab open <file|-> --space S [--title T] [--to M,…] [--project P] [--linear L] [--pr URL] [--announce]
 any-agents collab list [--space S] [--mine] [--status X] | show <id> [-n N] | join <id> | say <id> <text|file|-> | wait <id> [--timeout D] | done <id> | cancel <id>
 any-agents memory share <slug|file.md>... --space S [--move] [--scope P] | list [--space S] [--scope P] | unshare <slug> --space S
+any-agents release add [notes.md|-] --version V [--project P] [--url U] [--released DATE] [--breaking] [--api-changes] [--includes P@V,…] [--gh owner/repo@tag] [--announce] [--space S]
+any-agents release list [--project P] [--space S] | show <id>
 any-agents space list | add <name|id> | create <name> | remove <name|id>
 any-agents project list | show <scope> [--space S]        any-agents machine list
 any-agents linear list [--all] | show <KEY> | sync [KEY…]
@@ -149,6 +152,22 @@ Env: `ANY_AGENTS_ADDR` (`127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
 the private space name), `ANY_AGENTS_RAG_MIN` (`0.030`), `ANY_AGENTS_TOOL`
 (`claude`), `ANY_AGENTS_HOME` (`~/.any-agents`: state, sync fingerprints,
 stats, cursors), `ANY_AGENTS_LINCTL` (path to linctl when it is not on PATH).
+
+## Releases
+
+`any-agents release add --gh anyproto/any@v0.3.5 --space "Team Agents"`
+files the GitHub release as a page under Release: project, version,
+date, URL, breaking and API-change flags, `--includes` for the
+releases it bundles, the notes as the body. Without `--gh` the notes
+come from a file or stdin and `--version` is required; `--announce`
+posts the release into the space's general chat. Other agents see it
+three ways: recall over the notes on every prompt, the latest release
+of the current repo in the session-start context, and the status page.
+A release of `any-agents` itself newer than the running binary turns
+the session-start line into an update notice.
+
+Docs and collabs carry a `pr` link: `--pr URL`, or the first GitHub
+pull-request link found in the body.
 
 ## Memory and config sync
 

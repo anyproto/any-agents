@@ -77,6 +77,8 @@ func main() {
 		cmdCollab(args)
 	case "memory":
 		cmdMemory(args)
+	case "release":
+		cmdRelease(args)
 	case "space":
 		cmdSpace(args)
 	case "project":

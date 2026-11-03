@@ -21,6 +21,7 @@ const (
 	bundlePlan    = "agents-plan/v1"
 	bundleLinear  = "agents-linear/v1"
 	bundleCollab  = "agents-collab/v1"
+	bundleRelease = "agents-release/v1"
 
 	// pageType is any's built-in document type every collection member has.
 	pageType = "page"
@@ -34,16 +35,16 @@ const (
 
 // bundleNames are the state keys, in install order (targets before the
 // definitions that reference them by xKey).
-var bundleNames = []string{"app", "project", "machine", "session", "linear", "doc", "task", "plan", "collab"}
+var bundleNames = []string{"app", "project", "machine", "session", "linear", "release", "doc", "task", "plan", "collab"}
 
 var bundleIds = map[string]string{
 	"app": bundleApp, "project": bundleProject, "machine": bundleMachine, "session": bundleSession,
-	"doc": bundleDoc, "task": bundleTask, "plan": bundlePlan, "linear": bundleLinear, "collab": bundleCollab,
+	"doc": bundleDoc, "task": bundleTask, "plan": bundlePlan, "linear": bundleLinear, "collab": bundleCollab, "release": bundleRelease,
 }
 
 // collectionBundles declare a collection instead of a type: their
 // objects are pages filed under them.
-var collectionBundles = map[string]bool{
+var collectionBundles = map[string]bool{"release": true,
 	"project": true, "machine": true, "session": true, "linear": true, "doc": true, "task": true, "plan": true,
 }
 
@@ -297,6 +298,7 @@ func bundleDrafts() map[string]*BundleEnsure {
 			member("author", "Author", "a6", false),
 			datetime("date", "Written", "a7"),
 			checkbox("archived", "Archived", "a8"),
+			hideEmpty(urlProp("pr", "PR", "a9")),
 		},
 	}
 	task := &BundleEnsure{
@@ -358,10 +360,24 @@ func bundleDrafts() map[string]*BundleEnsure {
 			datetime("date", "Opened", "a6"),
 			hideEmpty(datetime("resolvedAt", "Resolved", "a7")),
 			unindexed(hideEmpty(urlProp("originSession", "Origin session", "a8"))),
+			hideEmpty(urlProp("pr", "PR", "a9")),
+		},
+	}
+	release := &BundleEnsure{
+		Id: bundleRelease, Name: "Release", XKey: "agent_release", Collection: true,
+		Properties: []PropertyDraft{
+			relation("project", "Project", "a0", false, "agent_project"),
+			text("version", "Version", "a1"),
+			date("released", "Released", "a2"),
+			urlProp("url", "Release URL", "a3"),
+			checkbox("breaking", "Breaking", "a4"),
+			checkbox("apiChanges", "API changes", "a5"),
+			relation("includes", "Includes", "a6", true),
+			member("author", "Author", "a7", false),
 		},
 	}
 	return map[string]*BundleEnsure{"app": app, "project": project, "machine": machine, "session": session,
-		"doc": doc, "task": task, "plan": plan, "linear": linear, "collab": collab}
+		"doc": doc, "task": task, "plan": plan, "linear": linear, "collab": collab, "release": release}
 }
 
 // iconOf renders the any-ui icon:v2 value for a lucide glyph.
@@ -373,5 +389,5 @@ func iconOf(glyph, color string) string {
 var typeIcons = map[string][2]string{
 	"app": {"bot", "purple"}, "project": {"folder-git-2", "blue"}, "machine": {"monitor", "teal"},
 	"session": {"terminal", "grey"}, "doc": {"file-text", "blue"}, "task": {"list-checks", "yellow"},
-	"plan": {"map", "teal"}, "linear": {"circle-dot", "purple"}, "collab": {"messages-square", "orange"},
+	"plan": {"map", "teal"}, "linear": {"circle-dot", "purple"}, "collab": {"messages-square", "orange"}, "release": {"package", "green"},
 }

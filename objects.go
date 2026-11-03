@@ -306,6 +306,7 @@ func docAdd(c *Client, st *State, sp *Space, args []string, taskProps map[string
 		fs.String("project", "", "project scope (default: the session's project, else the cwd repo)")
 		fs.String("linear", "", "Linear issue keys, comma-separated (ABC-123)")
 		fs.String("related", "", "comma-separated object ids or any:// links to relate")
+		fs.String("pr", "", "GitHub pull request URL (default: the first PR link in the body)")
 		fs.String("priority", "normal", "task priority: low | normal | high (task add only)")
 		fs.String("assignee", "", "task assignee: a member name or identity (task add only)")
 		fs.String("target", "", "task target machine hostname (task add only)")
@@ -344,6 +345,9 @@ func docAdd(c *Client, st *State, sp *Space, args []string, taskProps map[string
 	}
 	if ci.sessionId != "" && sp.Kind == kindPrivate {
 		docP["originSession"] = linkList([]string{ci.sessionId})
+	}
+	if pr := firstNonEmpty(get("pr"), prLink(body)); pr != "" {
+		docP["pr"] = pr
 	}
 	if v := get("linear"); v != "" {
 		links, err := linearLinks(c, sp, v)
@@ -483,6 +487,9 @@ func docList(c *Client, sp *Space, args []string) {
 		if sp.isA(r, "plan") {
 			facets += " plan:" + choiceOf(r, sp.owner("plan"), sp.prop("plan", "status"))
 		}
+		if pr := strOf(r, sp.owner("doc"), sp.prop("doc", "pr")); pr != "" {
+			facets += " " + prShort(pr)
+		}
 		for _, lid := range linksOf(r, sp.owner("doc"), sp.prop("doc", "linear")) {
 			facets += " " + issues[lid]
 		}
@@ -513,6 +520,9 @@ func showObject(c *Client, sp *Space, id string, withLinked bool) {
 	}
 	if sp.isA(row, "doc") {
 		meta = append(meta, "kind="+choiceOf(row, sp.owner("doc"), sp.prop("doc", "kind")))
+		if pr := strOf(row, sp.owner("doc"), sp.prop("doc", "pr")); pr != "" {
+			meta = append(meta, "pr="+pr)
+		}
 		if ids := linksOf(row, sp.owner("doc"), sp.prop("doc", "linear")); len(ids) > 0 {
 			meta = append(meta, "linear="+issueNames(ids))
 		}

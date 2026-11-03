@@ -42,6 +42,9 @@ func renderStatusPage(c *Client, sp *Space) error {
 			if len(helpers) > 0 {
 				extra = " with " + strings.Join(helpers, ", ")
 			}
+			if pr := strOf(r, t, sp.prop("collab", "pr")); pr != "" {
+				extra += fmt.Sprintf(" · [%s](%s)", prShort(pr), pr)
+			}
 			fmt.Fprintf(&b, "- %s [%s](%s) by %s%s\n", choiceOf(r, t, sp.prop("collab", "status")), nameOf(r), link(r["id"].(string)), who, extra)
 		}
 	}
@@ -99,6 +102,22 @@ func renderStatusPage(c *Client, sp *Space) error {
 	}
 
 	docs, _ := objectsOf(c, sp, "doc", nil, map[string]any{propPath(sp, "doc", "archived"): map[string]any{"$ne": true}})
+	if sp.has("release") {
+		rels, _ := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released")})
+		if len(rels) > 0 {
+			b.WriteString("\n## Recent releases\n\n")
+			for i, r := range rels {
+				if i == 5 {
+					break
+				}
+				flags := releaseFlags(r, sp)
+				if flags != "" {
+					flags = " (" + flags + ")"
+				}
+				fmt.Fprintf(&b, "- %s [%s](%s)%s\n", dateOf(r, sp.owner("release"), sp.prop("release", "released")), nameOf(r), link(r["id"].(string)), flags)
+			}
+		}
+	}
 	b.WriteString("\n## Recent docs\n\n")
 	n := 0
 	for _, d := range docs {

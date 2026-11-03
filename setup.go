@@ -179,7 +179,7 @@ func ensureBundles(c *Client, sp *Space) error {
 	waited := false
 	for _, name := range bundleNames {
 		bs := sp.bundle(name)
-		if bs.RootId != "" && len(bs.Props) == len(drafts[name].Properties) && sp.SetupVersion == setupVersion {
+		if bs.RootId != "" && len(bs.Props) >= len(drafts[name].Properties) && sp.SetupVersion == setupVersion {
 			continue
 		}
 		if !waited {
@@ -215,6 +215,25 @@ func ensureBundles(c *Client, sp *Space) error {
 		bs.Props = map[string]string{}
 		for _, p := range props {
 			bs.Props[p.XKey] = p.Id
+		}
+		// Additive schema evolution: a draft property the registered
+		// bundle lacks is added to its root; ids derive from (root, xKey),
+		// so members converge on the same property.
+		for _, d := range drafts[name].Properties {
+			if _, ok := bs.Props[d.XKey]; ok {
+				continue
+			}
+			var pid string
+			if collectionBundles[name] {
+				pid, err = c.AddCollectionProperty(sp.Id, b.RootId, d)
+			} else {
+				pid, err = c.AddProperty(sp.Id, b.RootId, d)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "any-agents: %s: property %s: %v\n", drafts[name].Id, d.XKey, err)
+				continue
+			}
+			bs.Props[d.XKey] = pid
 		}
 		var parts []PartInfo
 		if !collectionBundles[name] {
@@ -324,7 +343,7 @@ func ensureViews(c *Client, sp *Space) error {
 		name  string
 		views []view
 	}{
-		"doc": {"Docs", []view{{"default", "Table", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"kind", "project", "author", "linear", "originSession", "date"}}}},
+		"doc": {"Docs", []view{{"default", "Table", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"kind", "project", "author", "linear", "pr", "originSession", "date"}}}},
 		"task": {"Tasks", []view{
 			{"default", "Open", []string{"-modifiedAt"}, open, []string{"status", "priority", "assignee", "linearKey", "project", "target", "due"}},
 			{"all", "All", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"status", "priority", "assignee", "linearKey", "handledBy", "handledIn"}}}},
@@ -339,8 +358,15 @@ func ensureViews(c *Client, sp *Space) error {
 			name  string
 			views []view
 		}{"Collabs", []view{
-			{"default", "Open", []string{"-" + propPath(sp, "collab", "date")}, active, []string{"status", "requester", "assignees", "project", "date"}},
-			{"all", "All", []string{"-" + propPath(sp, "collab", "date")}, nil, []string{"status", "requester", "assignees", "project", "date", "resolvedAt"}}}}
+			{"default", "Open", []string{"-" + propPath(sp, "collab", "date")}, active, []string{"status", "requester", "assignees", "project", "pr", "date"}},
+			{"all", "All", []string{"-" + propPath(sp, "collab", "date")}, nil, []string{"status", "requester", "assignees", "project", "pr", "date", "resolvedAt"}}}}
+	}
+	if sp.has("release") {
+		views["release"] = struct {
+			name  string
+			views []view
+		}{"Releases", []view{{"default", "Table", []string{"-" + propPath(sp, "release", "released")}, nil,
+			[]string{"project", "version", "released", "breaking", "apiChanges", "url", "includes", "author"}}}}
 	}
 	for name, v := range views {
 		dv, err := ensureDataview(c, sp, name)

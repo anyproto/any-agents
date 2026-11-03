@@ -295,6 +295,13 @@ func (c *Client) AddProperty(space, typeId string, d PropertyDraft) (string, err
 	return out.PropId, c.do("POST", "/v1/spaces/"+seg(space)+"/types/"+seg(typeId)+"/properties", d, &out)
 }
 
+func (c *Client) AddCollectionProperty(space, collectionId string, d PropertyDraft) (string, error) {
+	var out struct {
+		PropId string `json:"propId"`
+	}
+	return out.PropId, c.do("POST", "/v1/spaces/"+seg(space)+"/collections/"+seg(collectionId)+"/properties", d, &out)
+}
+
 type PartDataset struct {
 	Id         string `json:"id"`
 	Key        string `json:"key"`

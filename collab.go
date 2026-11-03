@@ -145,6 +145,7 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 		fs.String("project", "", "project scope (default: the cwd repo)")
 		fs.String("linear", "", "Linear issue keys, comma-separated")
 		fs.String("related", "", "comma-separated object ids or links to relate")
+		fs.String("pr", "", "GitHub pull request URL (default: the first PR link in the body)")
 		fs.Bool("announce", false, "also post the request with its link into the space's general chat")
 		fs.String("s", "", "session id (default: the tool's session env var)")
 	})
@@ -175,6 +176,9 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 	}
 	if ci.sessionId != "" {
 		cp["originSession"] = globalLink(st.Private, ci.sessionId)
+	}
+	if pr := firstNonEmpty(get("pr"), prLink(body)); pr != "" {
+		cp["pr"] = pr
 	}
 	if v := get("to"); v != "" {
 		links, err := resolveMembers(c, sp, v)
@@ -276,6 +280,9 @@ func collabList(c *Client, st *State, args []string) {
 			}
 			fmt.Printf("%s  %-11s %-10s %-12s %s%s", globalLink(sp.Id, id), choiceOf(r, t, sp.prop("collab", "status")),
 				pad(members[identityOf(requester)], 10), pad(projects[firstLink(r, sp, "collab", "project")], 12), nameOf(r), fresh)
+			if pr := strOf(r, t, sp.prop("collab", "pr")); pr != "" {
+				fmt.Printf("  %s", prShort(pr))
+			}
 			if len(names) > 0 {
 				fmt.Printf("  [%s]", strings.Join(names, ", "))
 			}
@@ -298,6 +305,9 @@ func collabShow(c *Client, st *State, sp *Space, id string, n int) {
 	fmt.Printf("# %s\n%s\nstatus=%s  requester=%s  assignees=%s  space=%s\n", nameOf(row), globalLink(sp.Id, id),
 		choiceOf(row, t, sp.prop("collab", "status")), members[identityOf(firstMember(row, t, sp.prop("collab", "requester")))],
 		strings.Join(names, ","), sp.Name)
+	if pr := strOf(row, t, sp.prop("collab", "pr")); pr != "" {
+		fmt.Printf("pr=%s\n", pr)
+	}
 	body, err := c.MarkdownGet(sp.Id, id)
 	if err != nil {
 		fatal(err)

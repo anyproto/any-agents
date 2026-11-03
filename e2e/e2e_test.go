@@ -213,6 +213,63 @@ func TestE2E(t *testing.T) {
 	t.Run("feedback_and_stats", testFeedbackAndStats)
 	t.Run("prompt_hook_recalls_once_per_session", testPromptHook)
 	t.Run("eval_reads_the_golden_set", testEval)
+	t.Run("release_add_list_show_and_update_notice", func(t *testing.T) {
+		st := loadStateT(t, homeA)
+		ps := st.priv()
+		r := ps.owner("release")
+		notes := "# any v9.9.9\n\nShipped with the e2e harness.\n\n## New\n\n- the release collection\n"
+		out, errOut := runCLI(t, runOpts{sid: sidA, stdin: notes}, "release", "add", "-", "--project", "any", "--version", "v9.9.9",
+			"--url", "https://github.com/anyproto/any/releases/tag/v9.9.9", "--released", "2026-01-02", "--breaking")
+		mustNotLogErrors(t, errOut, "release add")
+		relId := linkId(t, out)
+		row := apiObject(t, relId)
+		mustEqual(t, typeOf(row), "page", "release object type")
+		mustBeFiled(t, row, r, "release")
+		mustEqual(t, nameOf(row), "any v9.9.9", "release name")
+		mustEqual(t, strOf(row, r, ps.prop("release", "version")), "v9.9.9", "release version")
+		mustEqual(t, strOf(row, r, ps.prop("release", "url")), "https://github.com/anyproto/any/releases/tag/v9.9.9", "release url")
+		if b, _ := group(row, r)[ps.prop("release", "breaking")].(bool); !b {
+			t.Error("release add --breaking did not set the flag")
+		}
+		if firstLink(row, r, ps.prop("release", "project")) == "" {
+			t.Error("release add did not link the project page")
+		}
+		mustEqualSlice(t, arrOf(row, r, ps.prop("release", "author")), []string{"any://u/" + identity}, "release author")
+		mustOnlyDeclaredProps(t, ps, "release", row)
+		mustContain(t, apiMarkdown(t, relId), "the release collection", "release notes body")
+
+		out, _ = runCLI(t, runOpts{sid: sidA}, "release", "list")
+		mustContain(t, out, "v9.9.9", "release list")
+		mustContain(t, out, "breaking", "release list shows the flags")
+		out, _ = runCLI(t, runOpts{sid: sidA}, "release", "show", relId)
+		mustContain(t, out, "version=v9.9.9", "release show meta")
+		mustContain(t, out, "the release collection", "release show body")
+
+		// the same project and version re-saves the page in place
+		out, errOut = runCLI(t, runOpts{sid: sidA, stdin: notes + "\nAmended.\n"}, "release", "add", "-", "--project", "any", "--version", "v9.9.9")
+		mustContain(t, errOut, "updated existing", "release add twice")
+		mustEqual(t, linkId(t, out), relId, "release add twice keeps the page")
+		mustContain(t, apiMarkdown(t, relId), "Amended.", "release notes updated")
+
+		// --includes resolves bundled releases by project@version
+		out, _ = runCLI(t, runOpts{sid: sidA, stdin: "SDK notes.\n"}, "release", "add", "-", "--project", "any-sync-sdk", "--version", "v9.0.0")
+		sdkId := linkId(t, out)
+		runCLI(t, runOpts{sid: sidA, stdin: notes}, "release", "add", "-", "--project", "any", "--version", "v9.9.9", "--includes", "any-sync-sdk@v9.0.0")
+		row = apiObject(t, relId)
+		mustEqualSlice(t, arrOf(row, r, ps.prop("release", "includes")), []string{"any://" + sdkId}, "release includes")
+		_, errOut = runCLI(t, runOpts{sid: sidA, stdin: "n\n", wantFail: true}, "release", "add", "-", "--project", "any", "--version", "v9.9.10", "--includes", "any-store@v0.0.0")
+		mustContain(t, errOut, "no release any-store v0.0.0", "release add with an unknown include")
+
+		// the current repo's latest release and a newer any-agents reach the
+		// session-start context
+		runCLI(t, runOpts{sid: sidA, stdin: "Project notes.\n"}, "release", "add", "-", "--version", "v1.2.3")
+		runCLI(t, runOpts{sid: sidA, stdin: "Faster.\n"}, "release", "add", "-", "--project", "any-agents", "--version", "v99.0.0", "--url", "https://example.invalid/any-agents/v99.0.0")
+		ctx := sessionStartHook(t, sidA, "resume")
+		mustContain(t, ctx, "Latest release of "+scope+": v1.2.3", "latest release line")
+		mustContain(t, ctx, "any-agents v99.0.0 is out", "update notice")
+		mustContain(t, ctx, "https://example.invalid/any-agents/v99.0.0", "update notice links the release")
+		mustContain(t, apiMarkdown(t, ps.owner("app")), "## Recent releases", "status page lists releases")
+	})
 	t.Run("status_page_reflects_the_space", testStatusPage)
 }
 
@@ -884,7 +941,8 @@ func testDocs(t *testing.T) {
 
 	// re-adding the same title updates the object in place
 	body2 := "# E2E Report\n\nSecond revision of the report.\n\nThe " + phrase + ".\n\nMARKER-ORIGINAL holds until the edit test.\n"
-	out, _ = runCLI(t, runOpts{sid: sidA, stdin: body2}, "doc", "add", "-", "--kind", "report")
+	out, _ = runCLI(t, runOpts{sid: sidA, stdin: body2}, "doc", "add", "-", "--kind", "report", "--pr", "https://github.com/anyproto/any-agents/pull/2")
+	mustEqual(t, strOf(apiObject(t, linkId(t, out)), ps.owner("doc"), ps.prop("doc", "pr")), "https://github.com/anyproto/any-agents/pull/2", "doc pr")
 	mustEqual(t, linkId(t, out), docObj, "re-add with the same title returns the same object")
 	mustEqual(t, len(docsNamed(t, ps, "E2E Report")), 1, "objects named E2E Report after re-add")
 	mustContain(t, apiMarkdown(t, docObj), "Second revision", "doc body after re-add")
@@ -1363,7 +1421,7 @@ func testCollabSpace(t *testing.T) {
 	// collabs: requests between members' agents (the chat itself is not
 	// exercised here)
 	reqPath := filepath.Join(tmpRoot, "request.md")
-	writeFile(t, reqPath, "# E2E Help Request\n\nPlease look at the e2e suite.\n")
+	writeFile(t, reqPath, "# E2E Help Request\n\nPlease look at the e2e suite.\nhttps://github.com/anyproto/any-agents/pull/1\n")
 	if !ts.collabOn() {
 		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "open", reqPath, "--space", teamName)
 		mustContain(t, errOut, "collabs are off in "+teamName, "collab open without the Collab bundle")
@@ -1382,6 +1440,7 @@ func testCollabSpace(t *testing.T) {
 		mustEqualSlice(t, arrOf(row, c, ts.prop("collab", "requester")), []string{"any://u/" + identity}, "collab requester")
 		mustEqual(t, firstLink(row, c, ts.prop("collab", "project")), teamProject, "collab project")
 		mustEqual(t, strOf(row, c, ts.prop("collab", "originSession")), "any://o/"+spaceId+"/"+sessionObjA, "collab originSession")
+		mustEqual(t, strOf(row, c, ts.prop("collab", "pr")), "https://github.com/anyproto/any-agents/pull/1", "collab pr from the body")
 		mustContain(t, apiMarkdownIn(t, teamId, collabId), "Please look at the e2e suite", "collab body")
 		mustContain(t, apiMarkdown(t, sessionObjA), collabLink, "the private session notes the opened collab")
 		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "list", "--space", teamName, "--mine")

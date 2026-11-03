@@ -45,7 +45,7 @@ properties.
 
 Collab properties: `status` request · in_progress · done · canceled,
 `requester` member, `assignees` member (multiple), `project`, `linear`,
-`related`, `date`, `resolvedAt`, `originSession` url.
+`related`, `date`, `resolvedAt`, `originSession` url, `pr` url.
 
 Rule: the chat part needs an any server that lets a client type declare
 the chat module (branch `cheggaaa/chat-part-user-types`). On an older
@@ -63,7 +63,8 @@ client gets a page with a body.
 | Project | `agent_project` | key, repo, status, memories, lastActivity | deterministic child `project:<scope>` of the app root — one page per repo, converged across machines and members |
 | Machine | `agent_machine` | hostname, os, user, bridgeVersion, tools, lastSeen, status | child `machine:<host>`, private space only |
 | Session | `agent_session` | status, tool, project, machine, owner (member), startedAt, endedAt, summary, linear, transcript, host, toolVersion, sessionId, cwd, sharedTo, sharedFrom | the session-start hook; `session share` in a collab space |
-| Doc | `agent_doc` | kind, project, originSession, sessions, related, linear, author (member), date, archived | `doc add`, or a human writing a page |
+| Doc | `agent_doc` | kind, project, originSession, sessions, related, linear, author (member), date, archived, pr | `doc add`, or a human writing a page |
+| Release | `agent_release` | project, version, released, url, breaking, apiChanges, includes (releases), author (member) | `release add`, or a human filing a page under Release |
 | Task | `agent_task` | status, priority, assignee (member), linearKey, target, handledBy, handledIn, due | `task add`, or a human filing a Doc under Task (a phone works) |
 | Plan | `agent_plan` | status, approvedAt, executedBy, executedIn | `plan add <taskId>` |
 | Linear issue | `agent_linear_issue` | key, status, priority, team, assignee, url, dueDate, branch, syncedAt | child `linear:<KEY>`; `--linear` on any doc/task/plan/collab; `linear sync` through linctl |
