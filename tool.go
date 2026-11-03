@@ -91,10 +91,11 @@ func (t *claudeTool) ConfigRoots() []string {
 func (t *claudeTool) ConfigSkipDirs() []string { return []string{"skills/synced"} }
 
 // MemoryDir is Claude Code's auto-memory dir for a project path (the
-// harness keys it by the path with non-alphanumerics folded to '-').
+// harness keys it by the main checkout's path with non-alphanumerics folded
+// to '-', so a linked worktree or a subdirectory uses the repo's one dir).
 func (t *claudeTool) MemoryDir(projectDir string) string {
 	var b strings.Builder
-	for _, r := range projectDir {
+	for _, r := range resolveMemoryRoot(projectDir) {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 		} else {

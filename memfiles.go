@@ -185,6 +185,45 @@ func resolveScopeUncached(dir string) string {
 	return slugify(filepath.Base(dir))
 }
 
+// resolveMemoryRoot names the path Claude Code keys auto-memory by: the main
+// checkout for a linked worktree, the git toplevel for a subdirectory or a
+// submodule, the dir itself outside git.
+var memoryRootCache = map[string]string{}
+
+func resolveMemoryRoot(dir string) string {
+	if r, ok := memoryRootCache[dir]; ok {
+		return r
+	}
+	r := resolveMemoryRootUncached(dir)
+	memoryRootCache[dir] = r
+	return r
+}
+
+func resolveMemoryRootUncached(dir string) string {
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir").Output(); err == nil {
+		common := strings.TrimSpace(string(out))
+		if !filepath.IsAbs(common) {
+			common = filepath.Join(dir, common)
+		}
+		if filepath.Base(common) == ".git" {
+			return canonicalPath(filepath.Dir(common))
+		}
+	}
+	if top, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output(); err == nil {
+		if t := strings.TrimSpace(string(top)); t != "" {
+			return canonicalPath(t)
+		}
+	}
+	return dir
+}
+
+func canonicalPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
 var kindOrder = map[string]int{"user": 0, "feedback": 1, "project": 2, "reference": 3}
 
 // SharedSet is one collab space's memories for a project: the space's
