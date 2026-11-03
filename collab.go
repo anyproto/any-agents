@@ -76,6 +76,7 @@ func cmdCollab(args []string) {
 		if !sp.has("collab") {
 			fatal(fmt.Errorf("collabs are off in %s on this machine — run `any-agents install` (after updating the any server if it predates chat on user types)", sp.Name))
 		}
+		markEngaged(id)
 		collabShow(c, st, sp, id, atoi(fs.Lookup("n").Value.String()))
 	case "join", "done", "cancel", "reopen", "say", "wait":
 		fs, pos := parseArgs("collab "+args[0], args[1:], func(fs *flag.FlagSet) {
@@ -94,6 +95,7 @@ func cmdCollab(args []string) {
 		if !sp.has("collab") {
 			fatal(fmt.Errorf("collabs are off in %s on this machine — run `any-agents install` (after updating the any server if it predates chat on user types)", sp.Name))
 		}
+		markEngaged(id)
 		switch args[0] {
 		case "join":
 			if err := collabJoin(c, st, sp, id); err != nil {
@@ -279,6 +281,7 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 		_ = c.MarkdownAppend(sp.st.private().Id, ci.sessionId, fmt.Sprintf("\nOpened collab [%s](%s) in %s.\n", name, globalLink(sp.Id, id), sp.Name))
 	}
 	saveCursor(id, "")
+	markEngaged(id)
 	_ = renderStatusPage(c, sp)
 	if get("announce") == "true" {
 		if err := announceCollab(c, st, sp, id, name); err != nil {
@@ -743,6 +746,46 @@ func saveCursor(objectId, last string) {
 	_ = os.MkdirAll(filepath.Dir(cursorPath(objectId)), 0o755)
 	b, _ := json.Marshal(map[string]string{"last": last})
 	_ = os.WriteFile(cursorPath(objectId), b, 0o644)
+}
+
+// Engagement: the harness sessions of this member that took part in a
+// collab (opened, joined, read or wrote it). The Stop and prompt hooks
+// nag only those sessions; another session of the same member stays
+// out of a collab a sibling is handling.
+func engagedPath(objectId string) string {
+	return filepath.Join(stateDir(), "collab", objectId+".sessions")
+}
+
+func markEngaged(objectId string) {
+	sid := os.Getenv(currentTool().SessionEnv())
+	if sid == "" || engaged(objectId, sid) {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(engagedPath(objectId)), 0o755)
+	f, err := os.OpenFile(engagedPath(objectId), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(sid + "\n")
+	_ = f.Close()
+}
+
+// engaged reports whether a session took part in the collab; no session
+// (a plain CLI call) counts as engaged everywhere.
+func engaged(objectId, sid string) bool {
+	if sid == "" {
+		return true
+	}
+	b, err := os.ReadFile(engagedPath(objectId))
+	if err != nil {
+		return false
+	}
+	for _, l := range strings.Fields(string(b)) {
+		if l == sid {
+			return true
+		}
+	}
+	return false
 }
 
 // doneWhenHeading matches a "Done when" / "Definition of done" / "DoD"

@@ -175,7 +175,7 @@ func hookPrompt(tool Tool) {
 	}
 	c := hookClient()
 	prompt := strings.TrimSpace(in.Prompt)
-	notice := unreadCollabNotice(c, st)
+	notice := unreadCollabNotice(c, st, in.SessionId)
 	if len(prompt) < 20 || len(strings.Fields(prompt)) < 4 ||
 		strings.HasPrefix(prompt, "/") || strings.HasPrefix(prompt, "!") {
 		if notice != "" {
@@ -246,7 +246,7 @@ func hookPrompt(tool Tool) {
 // unreadCollabNotice names the open collabs I am part of that have
 // messages this machine has not read, or "". It nags on every prompt
 // until `collab show` or `collab wait` advances the cursor.
-func unreadCollabNotice(c *Client, st *State) string {
+func unreadCollabNotice(c *Client, st *State, sessionId string) string {
 	var items []string
 	for _, sp := range st.collabs() {
 		if !sp.ready() || !sp.has("collab") {
@@ -264,6 +264,9 @@ func unreadCollabNotice(c *Client, st *State) string {
 				continue
 			}
 			id, _ := r["id"].(string)
+			if !engaged(id, sessionId) {
+				continue // a sibling session of this member handles it
+			}
 			if n := newMessageCount(c, st, sp, id, 10); n > 0 {
 				role := "helper"
 				if requester == st.me() {
@@ -280,8 +283,9 @@ func unreadCollabNotice(c *Client, st *State) string {
 		" — read with `any-agents collab show <link>`, answer with `collab say`, then keep `collab wait <link>` running until the requester closes it (as the requester: `collab done <link> --met \"<evidence>\"` once the definition of done holds).\n"
 }
 
-// hookStop holds the agent once per turn when a collab it is part of
-// has an unread reply, so posting an answer is not the end of the task.
+// hookStop holds the agent once per turn when a collab this session took
+// part in has an unread reply, so posting an answer is not the end of
+// the task; a sibling session of the same member is left alone.
 func hookStop(tool Tool) {
 	in := tool.ParseHookInput(os.Stdin)
 	if in.StopHookActive {
@@ -291,7 +295,7 @@ func hookStop(tool Tool) {
 	if err != nil || st.private() == nil || !st.private().ready() {
 		return
 	}
-	if notice := unreadCollabNotice(hookClient(), st); notice != "" {
+	if notice := unreadCollabNotice(hookClient(), st, in.SessionId); notice != "" {
 		tool.EmitBlock(strings.TrimSpace(notice))
 	}
 }

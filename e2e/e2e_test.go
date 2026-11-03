@@ -1847,8 +1847,26 @@ func testSharedMemory(t *testing.T) {
 		mustBeWritable(t, epsM, false, "member's epsilon file")
 	}
 
-	// unshare retracts; every member's pull drops the file
-	out, _ = runCLI(t, runOpts{}, "memory", "unshare", delta, "--space", teamName)
+	// unshare moves the memory back to the private space by default
+	out, _ = runCLI(t, runOpts{}, "memory", "unshare", eps, "--space", teamName)
+	mustContain(t, out, recId(eps)+" moved back to the private space", "memory unshare output (move back)")
+	epsPriv := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(epsPath))), eps+".md")
+	mustContain(t, readFile(t, epsPriv), "Epsilon body, never private.", "epsilon restored as a private file")
+	mustEqual(t, memRecords(t, ps)[recId(eps)] != nil, true, "epsilon has a private record after unshare")
+	mustEqual(t, fmt.Sprint(teamMemRecords(t, addr, ts)[recId(eps)]["kind"]), "retracted", "epsilon team record kind after unshare")
+	mustNotExist(t, epsPath, "epsilon mirror file after unshare")
+	// drop the restored copy again so the counts later in the suite hold
+	if err := os.Remove(epsPriv); err != nil {
+		t.Fatal(err)
+	}
+	runCLI(t, runOpts{}, "push")
+	if r := memRecords(t, ps)[recId(eps)]; r != nil && fmt.Sprint(r["kind"]) != "retracted" {
+		t.Errorf("epsilon private record still live after its file was removed: kind %v", r["kind"])
+	}
+
+	// unshare --delete retracts without a private copy; every member's
+	// pull drops the file
+	out, _ = runCLI(t, runOpts{}, "memory", "unshare", delta, "--space", teamName, "--delete")
 	mustContain(t, out, recId(delta)+" retracted from "+teamName, "memory unshare output")
 	mustEqual(t, fmt.Sprint(teamMemRecords(t, addr, ts)[recId(delta)]["kind"]), "retracted", "delta team record kind after unshare")
 	_, errOut = runCLI(t, runOpts{}, "pull")

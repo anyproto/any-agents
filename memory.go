@@ -31,7 +31,7 @@ const (
 
 func cmdMemory(args []string) {
 	if len(args) == 0 {
-		fatal(fmt.Errorf("usage: memory share <slug|file.md>... --space S [--move] | list [--space S] | unshare <slug> --space S"))
+		fatal(fmt.Errorf("usage: memory share <slug|file.md>... --space S [--move] | list [--space S] | unshare <slug> --space S [--delete]"))
 	}
 	c := NewClient()
 	st := mustSetup(c)
@@ -39,6 +39,7 @@ func cmdMemory(args []string) {
 		spaceFlag(fs)
 		fs.String("scope", "", "project scope (default: the cwd repo)")
 		fs.Bool("move", false, "share: retract the private record and keep the memory under memory/shared/")
+		fs.Bool("delete", false, "unshare: drop the memory instead of moving it back to the private space")
 	})
 	get := func(k string) string { return fs.Lookup(k).Value.String() }
 	cwd, _ := os.Getwd()
@@ -154,6 +155,24 @@ func cmdMemory(args []string) {
 		if author, _ := rows[0]["author"].(string); author != "" && author != st.Identity {
 			fatal(fmt.Errorf("%s was published by %s; only the publisher can retract it", id, memberIndex(c, sp)[author]))
 		}
+		// Unsharing moves the memory back home unless told to drop it:
+		// after `share --move` the team copy is the only one, and a bare
+		// retraction would lose it.
+		memDir := currentTool().MemoryDir(cwd)
+		item := memItemFromRecord(rows[0])
+		target := filepath.Join(memDir, safeFile(item.Slug))
+		restored := false
+		if get("delete") != "true" {
+			if _, err := os.Stat(target); os.IsNotExist(err) {
+				if err := os.MkdirAll(memDir, 0o755); err != nil {
+					fatal(err)
+				}
+				if err := os.WriteFile(target, []byte(renderMemFile(item)), 0o644); err != nil {
+					fatal(err)
+				}
+				restored = true
+			}
+		}
 		res, err := c.Upsert(sp.Id, sp.owner("app"), sp.coll(dsMemories), []UpsertRecord{retractRecord(id, shortId(st.Identity))})
 		if err != nil {
 			fatal(err)
@@ -161,7 +180,21 @@ func cmdMemory(args []string) {
 		for _, rej := range res.Rejections {
 			fatal(fmt.Errorf("%s: %s", rej.Id, rej.Reason))
 		}
-		fmt.Printf("%s retracted from %s\n", id, sp.Name)
+		if get("delete") != "true" {
+			if err := pushMemory(c, st.private(), cwd); err != nil {
+				fatal(err)
+			}
+		}
+		shared := pullSharedMemory(c, st, cwd)
+		_, _ = pullMemory(c, st.private(), cwd, false, shared)
+		switch {
+		case restored:
+			fmt.Printf("%s moved back to the private space (%s)\n", id, target)
+		case get("delete") == "true":
+			fmt.Printf("%s retracted from %s\n", id, sp.Name)
+		default:
+			fmt.Printf("%s retracted from %s; the private copy stays\n", id, sp.Name)
+		}
 	default:
 		fatal(fmt.Errorf("unknown memory command %q", args[0]))
 	}
