@@ -10,7 +10,7 @@ package main
 
 const (
 	version      = "0.2.0"
-	setupVersion = 2 // bump to force a full re-ensure on every machine
+	setupVersion = 3 // bump to force a full re-ensure on every machine
 
 	bundleApp     = "agents/v1"
 	bundleProject = "agents-project/v1"
@@ -361,6 +361,7 @@ func bundleDrafts() map[string]*BundleEnsure {
 			hideEmpty(datetime("resolvedAt", "Resolved", "a7")),
 			unindexed(hideEmpty(urlProp("originSession", "Origin session", "a8"))),
 			hideEmpty(urlProp("pr", "PR", "a9")),
+			hideEmpty(longtext("doneWhen", "Done when", "a10")),
 		},
 	}
 	release := &BundleEnsure{

@@ -1426,13 +1426,17 @@ func testCollabSpace(t *testing.T) {
 	// collabs: requests between members' agents (the chat itself is not
 	// exercised here)
 	reqPath := filepath.Join(tmpRoot, "request.md")
-	writeFile(t, reqPath, "# E2E Help Request\n\nPlease look at the e2e suite.\nhttps://github.com/anyproto/any-agents/pull/1\n")
+	writeFile(t, reqPath, "# E2E Help Request\n\nPlease look at the e2e suite.\nhttps://github.com/anyproto/any-agents/pull/1\n\n## Done when\n\nThe suite passes twice.\n")
 	if !ts.collabOn() {
 		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "open", reqPath, "--space", teamName)
 		mustContain(t, errOut, "collabs are off in "+teamName, "collab open without the Collab bundle")
 		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "list", "--space", teamName)
 		mustContain(t, errOut, "collabs are off in "+teamName, "collab list without the Collab bundle")
 	} else {
+		noDod := filepath.Join(tmpRoot, "request-nodod.md")
+		writeFile(t, noDod, "# No DoD\n\nJust a question.\n")
+		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "open", noDod, "--space", teamName)
+		mustContain(t, errOut, "definition of done", "collab open without a definition of done")
 		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "open", reqPath, "--space", teamName)
 		collabId := linkId(t, out)
 		collabLink := "any://o/" + teamId + "/" + collabId
@@ -1446,6 +1450,7 @@ func testCollabSpace(t *testing.T) {
 		mustEqual(t, firstLink(row, c, ts.prop("collab", "project")), teamProject, "collab project")
 		mustEqual(t, strOf(row, c, ts.prop("collab", "originSession")), "any://o/"+spaceId+"/"+sessionObjA, "collab originSession")
 		mustEqual(t, strOf(row, c, ts.prop("collab", "pr")), "https://github.com/anyproto/any-agents/pull/1", "collab pr from the body")
+		mustEqual(t, strOf(row, c, ts.prop("collab", "doneWhen")), "The suite passes twice.", "collab doneWhen from the body")
 		mustContain(t, apiMarkdownIn(t, teamId, collabId), "Please look at the e2e suite", "collab body")
 		mustContain(t, apiMarkdown(t, sessionObjA), collabLink, "the private session notes the opened collab")
 		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "list", "--space", teamName, "--mine")
@@ -1454,7 +1459,18 @@ func testCollabSpace(t *testing.T) {
 		row = apiObject(t, collabId, teamId)
 		mustEqual(t, choiceOf(row, c, ts.prop("collab", "status")), "in_progress", "collab status after join")
 		mustEqualSlice(t, arrOf(row, c, ts.prop("collab", "assignees")), []string{"any://u/" + identity}, "collab assignees after join")
-		runCLI(t, runOpts{sid: sidA}, "collab", "done", collabLink)
+		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "done", collabLink)
+		mustContain(t, errOut, "--met", "collab done without --met")
+		runCLI(t, runOpts{sid: sidA}, "collab", "done", collabLink, "--met", "the suite passed twice")
+		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "show", collabLink)
+		mustContain(t, out, "Done: the suite passed twice", "collab done posts the evidence to the chat")
+		runCLI(t, runOpts{sid: sidA}, "collab", "reopen", collabLink, "--met", "closed too early")
+		row = apiObject(t, collabId, teamId)
+		mustEqual(t, choiceOf(row, c, ts.prop("collab", "status")), "in_progress", "collab status after reopen")
+		if group(row, c)[ts.prop("collab", "resolvedAt")] != nil {
+			t.Error("collab reopen kept resolvedAt")
+		}
+		runCLI(t, runOpts{sid: sidA}, "collab", "done", collabLink, "--met", "the suite passed twice")
 		row = apiObject(t, collabId, teamId)
 		mustEqual(t, choiceOf(row, c, ts.prop("collab", "status")), "done", "collab status after done")
 		if group(row, c)[ts.prop("collab", "resolvedAt")] == nil {
@@ -1559,6 +1575,17 @@ func testCollabMember(t *testing.T) {
 		t.Fatalf("collab space %s missing from a state.json (owner %v, member %v)", teamId, ts != nil, tm != nil)
 	}
 	mustEqual(t, tm.Kind, "collab", "member's collab space kind")
+
+	// a helper cannot close another member's request; the requester can
+	reqM := filepath.Join(tmpRoot, "request-member.md")
+	writeFile(t, reqM, "# Member request\n\nFrom the second member.\n\n## Done when\n\nThe owner answers.\n")
+	out, _ = runCLI(t, runOpts{member: true}, "collab", "open", reqM, "--space", teamName)
+	memberCollab := "any://o/" + teamId + "/" + linkId(t, out)
+	_, errOut := runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "done", memberCollab, "--met", "not mine to close")
+	mustContain(t, errOut, "only the requester", "collab done by a helper")
+	runCLI(t, runOpts{member: true}, "collab", "cancel", memberCollab, "--met", "e2e over")
+	out, _ = runCLI(t, runOpts{member: true}, "collab", "show", memberCollab)
+	mustContain(t, out, "Canceled: e2e over", "collab cancel posts the reason")
 	for name := range ts.Bundles {
 		mustEqual(t, tm.owner(name), ts.owner(name), "member's bundle "+name+" root (adopted, not reinstalled)")
 	}

@@ -95,7 +95,8 @@ Hooks never break a session: every failure is logged and exits 0.
 ## Collab: asking another agent for help
 
 ```
-# requester, inside a session, from the repo that needs help
+# requester, inside a session, from the repo that needs help; the request
+# states its definition of done (a "## Done when" section or --done-when)
 any-agents collab open request.md --space team [--to alice] [--announce]
 
 # a helper's agent (sees the request at session start)
@@ -107,10 +108,16 @@ any-agents collab wait <link>              # blocks up to 90 s for the other sid
 # requester's agent
 any-agents collab wait <link>
 any-agents collab say <link> "thanks, that fixed it"
-any-agents collab done <link>
+any-agents collab done <link> --met "tests green on main"
 ```
 
-The body carries the request; the chat is the thread. `--announce`
+The body carries the request; the chat is the thread. The requester
+states the definition of done when opening and is the only one who
+closes: `collab done` by anyone else is refused, and the requester's
+`--met` evidence is posted to the chat before the status changes, so an
+agent closes only once the stated condition holds or the user says so.
+A helper reports in the chat and leaves the request open; `collab reopen`
+undoes a close by the requester or a helper. `--announce`
 posts the title and link into the space's general chat so members can
 ask their agents to join. Messages are sent as the account's agent
 (`agent {name: "Claude (alice)", done: true}`), so the owner's own
@@ -132,8 +139,8 @@ any-agents task list [--all] [--mine] [--project P] [--space S] | show <id> | st
 any-agents plan add [<taskId>] <file|-> [--status draft|approved] [--replace] | list [--all] | show <id> | approve <id> | done <id>
 any-agents session note <text|file|-> | show | update [--summary S] [--title T] [--linear KEYS] | list [--project P] [--space S] | transcript [-o FILE]
 any-agents session share --space S [--transcript]
-any-agents collab open <file|-> --space S [--title T] [--to M,…] [--project P] [--linear L] [--pr URL] [--announce]
-any-agents collab list [--space S] [--mine] [--status X] | show <id> [-n N] | join <id> | say <id> <text|file|-> | wait <id> [--timeout D] | done <id> | cancel <id>
+any-agents collab open <file|-> --space S [--title T] [--to M,…] [--project P] [--linear L] [--pr URL] [--done-when "…"] [--announce]
+any-agents collab list [--space S] [--mine] [--status X] | show <id> [-n N] | join <id> | say <id> <text|file|-> | wait <id> [--timeout D] | done <id> --met "…" | cancel <id> [--met "…"] | reopen <id> [--met "…"]
 any-agents memory share <slug|file.md>... --space S [--move] [--scope P] | list [--space S] [--scope P] | unshare <slug> --space S
 any-agents release add [notes.md|-] --version V [--project P] [--url U] [--released DATE] [--breaking] [--api-changes] [--includes P@V,…] [--gh owner/repo@tag] [--announce] [--space S]
 any-agents release list [--project P] [--space S] | show <id>

@@ -45,7 +45,9 @@ properties.
 
 Collab properties: `status` request · in_progress · done · canceled,
 `requester` member, `assignees` member (multiple), `project`, `linear`,
-`related`, `date`, `resolvedAt`, `originSession` url, `pr` url.
+`related`, `date`, `resolvedAt`, `originSession` url, `pr` url,
+`doneWhen` longtext: the definition of done, stated at `open`. Only the
+requester closes a collab, with `--met` evidence posted to the chat.
 
 Rule: the chat part needs an any server that lets a client type declare
 the chat module (branch `cheggaaa/chat-part-user-types`). On an older

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -51,7 +52,7 @@ func collabSpace(st *State, flag string) *Space {
 
 func cmdCollab(args []string) {
 	if len(args) == 0 {
-		fatal(fmt.Errorf("usage: collab open|list|show|join|say|wait|done|cancel"))
+		fatal(fmt.Errorf("usage: collab open|list|show|join|say|wait|done|cancel|reopen"))
 	}
 	c := NewClient()
 	st := mustSetup(c)
@@ -76,11 +77,12 @@ func cmdCollab(args []string) {
 			fatal(fmt.Errorf("collabs are off in %s on this machine — run `any-agents install` (after updating the any server if it predates chat on user types)", sp.Name))
 		}
 		collabShow(c, st, sp, id, atoi(fs.Lookup("n").Value.String()))
-	case "join", "done", "cancel", "say", "wait":
+	case "join", "done", "cancel", "reopen", "say", "wait":
 		fs, pos := parseArgs("collab "+args[0], args[1:], func(fs *flag.FlagSet) {
 			spaceFlag(fs)
 			fs.Duration("timeout", 90*time.Second, "how long wait blocks for a reply (exit 2 on timeout: run it again to keep waiting)")
 			fs.Bool("all", false, "wait: return on any message, own ones included")
+			fs.String("met", "", "done: how the definition of done was met; cancel/reopen: the reason (posted to the chat)")
 		})
 		if len(pos) < 1 {
 			fatal(fmt.Errorf("collab %s <id>", args[0]))
@@ -98,8 +100,63 @@ func cmdCollab(args []string) {
 				fatal(err)
 			}
 			_ = renderStatusPage(c, sp)
+		case "reopen":
+			// A closed request comes back as in_progress (request when
+			// nobody has joined); the requester or a helper may do it.
+			row, err := c.GetObject(sp.Id, id)
+			if err != nil {
+				fatal(err)
+			}
+			t := sp.owner("collab")
+			requester := firstMember(row, t, sp.prop("collab", "requester"))
+			assignees := membersOf(row, t, sp.prop("collab", "assignees"))
+			if requester != st.me() && !contains(assignees, st.me()) {
+				fatal(fmt.Errorf("only the requester or a helper reopens a collab"))
+			}
+			status := "in_progress"
+			if len(assignees) == 0 {
+				status = "request"
+			}
+			pp := map[string]any{"status": []string{status}, "resolvedAt": nil}
+			if err := c.SetProperties(sp.Id, id, t, props(sp, "collab", pp)); err != nil {
+				fatal(err)
+			}
+			if met := strings.TrimSpace(fs.Lookup("met").Value.String()); met != "" {
+				if err := collabSay(c, st, sp, id, "Reopened: "+met); err != nil {
+					fatal(err)
+				}
+			}
+			_ = renderStatusPage(c, sp)
+			fmt.Printf("%s  %s\n", globalLink(sp.Id, id), status)
 		case "done", "cancel":
+			// The requester closes: the helper reports in the chat and
+			// leaves the request open.
+			row, err := c.GetObject(sp.Id, id)
+			if err != nil {
+				fatal(err)
+			}
+			t := sp.owner("collab")
+			if requester := firstMember(row, t, sp.prop("collab", "requester")); requester != "" && requester != st.me() {
+				fatal(fmt.Errorf("only the requester (%s) closes a collab — say in its chat that your part is done", memberIndex(c, sp)[identityOf(requester)]))
+			}
 			status := map[string]string{"done": "done", "cancel": "canceled"}[args[0]]
+			met := strings.TrimSpace(fs.Lookup("met").Value.String())
+			if args[0] == "done" {
+				if met == "" {
+					dod := strOf(row, t, sp.prop("collab", "doneWhen"))
+					if dod != "" {
+						dod = " (done when: " + dod + ")"
+					}
+					fatal(fmt.Errorf("collab done needs --met \"<how the definition of done was met>\"%s", dod))
+				}
+				if err := collabSay(c, st, sp, id, "Done: "+met); err != nil {
+					fatal(err)
+				}
+			} else if met != "" {
+				if err := collabSay(c, st, sp, id, "Canceled: "+met); err != nil {
+					fatal(err)
+				}
+			}
 			pp := map[string]any{"status": []string{status}, "resolvedAt": dateVal(time.Now())}
 			if err := c.SetProperties(sp.Id, id, sp.owner("collab"), props(sp, "collab", pp)); err != nil {
 				fatal(err)
@@ -146,6 +203,7 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 		fs.String("linear", "", "Linear issue keys, comma-separated")
 		fs.String("related", "", "comma-separated object ids or links to relate")
 		fs.String("pr", "", "GitHub pull request URL (default: the first PR link in the body)")
+		fs.String("done-when", "", "definition of done (default: the request's '## Done when' section)")
 		fs.Bool("announce", false, "also post the request with its link into the space's general chat")
 		fs.String("s", "", "session id (default: the tool's session env var)")
 	})
@@ -169,8 +227,12 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 	if name == "" {
 		fatal(fmt.Errorf("pass --title or start the request with a '# Heading'"))
 	}
+	dod := firstNonEmpty(strings.TrimSpace(get("done-when")), doneWhenOf(body))
+	if dod == "" {
+		fatal(fmt.Errorf("collab open needs a definition of done: --done-when \"…\" or a '## Done when' section in the request"))
+	}
 	ci := currentContext(c, st, sp, get("s"), get("project"))
-	cp := map[string]any{"status": []string{"request"}, "requester": []string{st.me()}, "date": dateVal(time.Now())}
+	cp := map[string]any{"status": []string{"request"}, "requester": []string{st.me()}, "date": dateVal(time.Now()), "doneWhen": dod}
 	if ci.projectId != "" {
 		cp["project"] = linkList([]string{ci.projectId})
 	}
@@ -308,6 +370,9 @@ func collabShow(c *Client, st *State, sp *Space, id string, n int) {
 	if pr := strOf(row, t, sp.prop("collab", "pr")); pr != "" {
 		fmt.Printf("pr=%s\n", pr)
 	}
+	if dod := strOf(row, t, sp.prop("collab", "doneWhen")); dod != "" {
+		fmt.Printf("done when: %s\n", dod)
+	}
 	body, err := c.MarkdownGet(sp.Id, id)
 	if err != nil {
 		fatal(err)
@@ -422,7 +487,7 @@ func collabDigest(c *Client, st *State) string {
 			continue
 		}
 		t := sp.owner("collab")
-		var requests, forMe, fresh []string
+		var requests, forMe, fresh, replies []string
 		for _, r := range rows {
 			id, _ := r["id"].(string)
 			requester := firstMember(r, t, sp.prop("collab", "requester"))
@@ -430,19 +495,34 @@ func collabDigest(c *Client, st *State) string {
 			mine := requester == st.me() || contains(assignees, st.me())
 			status := choiceOf(r, t, sp.prop("collab", "status"))
 			if status == "request" && requester != st.me() && contains(assignees, st.me()) && len(forMe) < 5 {
-				forMe = append(forMe, fmt.Sprintf("%q %s", nameOf(r), globalLink(sp.Id, id)))
+				item := fmt.Sprintf("%q %s", nameOf(r), globalLink(sp.Id, id))
+				if dod := strOf(r, t, sp.prop("collab", "doneWhen")); dod != "" {
+					item += " (done when: " + trunc(dod, 160) + ")"
+				}
+				forMe = append(forMe, item)
 			}
 			if status == "request" && !mine && len(requests) < 5 {
 				requests = append(requests, fmt.Sprintf("%q %s", nameOf(r), globalLink(sp.Id, id)))
 			}
-			if mine && len(fresh) < 5 {
+			if mine && len(fresh)+len(replies) < 10 {
 				if n := newMessageCount(c, st, sp, id, 10); n > 0 {
-					fresh = append(fresh, fmt.Sprintf("%q +%d %s", nameOf(r), n, globalLink(sp.Id, id)))
+					item := fmt.Sprintf("%q +%d %s", nameOf(r), n, globalLink(sp.Id, id))
+					if requester == st.me() {
+						if dod := strOf(r, t, sp.prop("collab", "doneWhen")); dod != "" {
+							item += " (done when: " + trunc(dod, 160) + ")"
+						}
+						replies = append(replies, item)
+					} else {
+						fresh = append(fresh, item)
+					}
 				}
 			}
 		}
 		if len(forMe) > 0 {
-			fmt.Fprintf(&b, "Collab space %s has %d help request(s) addressed to you: %s — `any-agents collab show <link>` reads one, `collab join` takes it.\n", sp.Name, len(forMe), strings.Join(forMe, "; "))
+			fmt.Fprintf(&b, "Collab space %s has %d help request(s) addressed to you: %s — `any-agents collab show <link>` reads one, `collab join` takes it; report in its chat and leave it open, the requester closes it.\n", sp.Name, len(forMe), strings.Join(forMe, "; "))
+		}
+		if len(replies) > 0 {
+			fmt.Fprintf(&b, "Replies on your request(s) in %s: %s — read them with `collab show`; answer with `collab say`; close with `any-agents collab done <link> --met \"<evidence>\"` only once the definition of done is met, or when the user says so.\n", sp.Name, strings.Join(replies, "; "))
 		}
 		if len(requests) > 0 {
 			fmt.Fprintf(&b, "Collab space %s has %d open help request(s) nobody took: %s — `any-agents collab show <link>` reads one, `collab join` takes it.\n", sp.Name, len(requests), strings.Join(requests, "; "))
@@ -644,4 +724,32 @@ func saveCursor(objectId, last string) {
 	_ = os.MkdirAll(filepath.Dir(cursorPath(objectId)), 0o755)
 	b, _ := json.Marshal(map[string]string{"last": last})
 	_ = os.WriteFile(cursorPath(objectId), b, 0o644)
+}
+
+// doneWhenHeading matches a "Done when" / "Definition of done" / "DoD"
+// heading in a request body.
+var doneWhenHeading = regexp.MustCompile(`(?mi)^#{1,6}\s*(done when|definition of done|dod)\s*:?\s*$`)
+
+// doneWhenOf is the paragraph under the request's definition-of-done
+// heading, joined into one line, or "".
+func doneWhenOf(body string) string {
+	loc := doneWhenHeading.FindStringIndex(body)
+	if loc == nil {
+		return ""
+	}
+	var lines []string
+	for _, l := range strings.Split(body[loc[1]:], "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "#") {
+			break
+		}
+		if l == "" {
+			if len(lines) > 0 {
+				break
+			}
+			continue
+		}
+		lines = append(lines, strings.TrimLeft(l, "-* "))
+	}
+	return trunc(strings.Join(lines, " "), 600)
 }
