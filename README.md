@@ -68,6 +68,13 @@ did, the bundle is adopted through a registry read, so that machine can
 join and talk in collabs but not open one, and nothing in the space is
 parked or lost (see docs/design.md § Mixed server versions).
 
+## Migrating from any-claude
+
+Same account and server: `any-agents install --create-space`, then
+`any-claude migrate --to Agents --apply` copies the old space; the
+memory files stay where they are. Step by step, with the team-space
+setup: [docs/migrating-from-any-claude.md](docs/migrating-from-any-claude.md).
+
 ## Session lifecycle
 
 - **session-start** pulls memories for the project and the tool's
