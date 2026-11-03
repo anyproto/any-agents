@@ -388,7 +388,7 @@ func ensureViews(c *Client, sp *Space) error {
 		views["release"] = struct {
 			name  string
 			views []view
-		}{"Releases", []view{{"default", "Table", []string{"-" + propPath(sp, "release", "released")}, nil,
+		}{"Releases", []view{{"default", "Table", []string{"-createdAt"}, nil,
 			[]string{"project", "version", "released", "breaking", "apiChanges", "url", "includes", "author"}}}}
 	}
 	for name, v := range views {

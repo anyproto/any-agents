@@ -297,7 +297,7 @@ func releaseList(c *Client, sp *Space, project string, n int) {
 	if !sp.has("release") {
 		fatal(fmt.Errorf("the Release bundle is not installed in %s", sp.Name))
 	}
-	rows, err := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released")})
+	rows, err := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released"), "-createdAt"})
 	if err != nil {
 		fatal(err)
 	}
@@ -371,7 +371,7 @@ func latestRelease(c *Client, sp *Space, scope string) map[string]any {
 	if pid == "" {
 		return nil
 	}
-	rows, err := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released")})
+	rows, err := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released"), "-createdAt"})
 	if err != nil {
 		return nil
 	}

@@ -103,7 +103,7 @@ func renderStatusPage(c *Client, sp *Space) error {
 
 	docs, _ := objectsOf(c, sp, "doc", nil, map[string]any{propPath(sp, "doc", "archived"): map[string]any{"$ne": true}})
 	if sp.has("release") {
-		rels, _ := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released")})
+		rels, _ := objectsOf(c, sp, "release", []string{"-" + propPath(sp, "release", "released"), "-createdAt"})
 		if len(rels) > 0 {
 			b.WriteString("\n## Recent releases\n\n")
 			for i, r := range rels {
