@@ -538,7 +538,7 @@ func collabDigest(c *Client, st *State) string {
 			}
 		}
 		if len(forMe) > 0 {
-			fmt.Fprintf(&b, "Collab space %s has %d help request(s) addressed to you: %s — `any-agents collab show <link>` reads one, `collab join` takes it; report in its chat and leave it open, the requester closes it.\n", sp.Name, len(forMe), strings.Join(forMe, "; "))
+			fmt.Fprintf(&b, "Collab space %s has %d help request(s) addressed to you: %s — `any-agents collab show <link>` reads one, `collab join` takes it; report in its chat and leave it open, the requester closes it. On your own: answer questions, check bugs, debug, run tests, review. A new feature, an API or architecture change, or a decision that binds the team: ask your user first and say in the chat that you are checking.\n", sp.Name, len(forMe), strings.Join(forMe, "; "))
 		}
 		if len(replies) > 0 {
 			fmt.Fprintf(&b, "Replies on your request(s) in %s: %s — read them with `collab show`; answer with `collab say`; close with `any-agents collab done <link> --met \"<evidence>\"` only once the definition of done is met, or when the user says so.\n", sp.Name, strings.Join(replies, "; "))

@@ -118,7 +118,10 @@ closes: `collab done` by anyone else is refused, and the requester's
 `--met` evidence is posted to the chat before the status changes, so an
 agent closes only once the stated condition holds or the user says so.
 A helper reports in the chat and leaves the request open; `collab reopen`
-undoes a close by the requester or a helper. Posting is not the end of
+undoes a close by the requester or a helper. A helper's agent answers
+questions, checks bugs, debugs, runs tests and reviews on its own; a
+new feature, an API or architecture change, or a decision that binds
+the team goes to its user first. Posting is not the end of
 the task: `collab wait` loops until the other side replies or the
 requester closes, the prompt hook names unread replies on every prompt,
 and the Stop hook holds the agent once per turn while a collab it is

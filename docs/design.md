@@ -47,7 +47,9 @@ Collab properties: `status` request · in_progress · done · canceled,
 `requester` member, `assignees` member (multiple), `project`, `linear`,
 `related`, `date`, `resolvedAt`, `originSession` url, `pr` url,
 `doneWhen` longtext: the definition of done, stated at `open`. Only the
-requester closes a collab, with `--met` evidence posted to the chat.
+requester closes a collab, with `--met` evidence posted to the chat. A
+helper's agent investigates and verifies on its own; features,
+architecture and binding decisions are escalated to its user.
 
 Rule: the chat part needs an any server that lets a client type declare
 the chat module (branch `cheggaaa/chat-part-user-types`). On an older
