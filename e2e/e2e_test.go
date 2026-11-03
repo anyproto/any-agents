@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -419,7 +420,7 @@ func testInstall(t *testing.T) {
 	mustEqual(t, ps.Id, spaceId, "private space id")
 	mustEqual(t, ps.Name, spaceName, "private space name")
 	mustEqual(t, ps.Kind, "private", "private space kind")
-	mustEqual(t, ps.SetupVersion, 1, "private space setupVersion")
+	mustEqual(t, ps.SetupVersion, wantSetupVersion(t), "private space setupVersion")
 	if ps.collabOn() {
 		if strings.Contains(out, "collabs  off") {
 			t.Errorf("install says collabs are off although the Collab bundle resolved:\n%s", out)
@@ -1203,6 +1204,10 @@ func testSessionLifecycle(t *testing.T) {
 	}
 
 	runCLI(t, runOpts{sid: sidA}, "session", "note", "A note appended by the e2e suite.")
+	// -s also takes the session page's id or link, which is what the
+	// session-start context prints
+	runCLI(t, runOpts{}, "session", "note", "-s", "any://o/"+spaceId+"/"+sessionObjA, "A note by object link.")
+	mustContain(t, apiMarkdown(t, sessionObjA), "A note by object link.", "session note -s <object link>")
 	sessionBody := apiMarkdown(t, sessionObjA)
 	mustContain(t, sessionBody, "A note appended by the e2e suite", "session body after note")
 	mustContain(t, sessionBody, "Started ", "session body header")
@@ -1275,7 +1280,7 @@ func testCollabSpace(t *testing.T) {
 	mustEqual(t, ts.Name, teamName, "collab space name")
 	mustEqual(t, ts.Kind, "collab", "collab space kind")
 	mustEqual(t, ts.MachineObjectId, "", "collab space machine page (machines stay private)")
-	mustEqual(t, ts.SetupVersion, 1, "collab space setupVersion")
+	mustEqual(t, ts.SetupVersion, wantSetupVersion(t), "collab space setupVersion")
 	if !ts.collabOn() {
 		mustContain(t, errOut, "collabs are off in "+teamName, "space create warning without the Collab bundle")
 	}
@@ -2906,4 +2911,20 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// wantSetupVersion is the binary's setupVersion, read from the source so
+// a bump does not have to be mirrored here.
+func wantSetupVersion(t *testing.T) int {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join("..", "schema.go"))
+	if err != nil {
+		t.Fatalf("read schema.go: %v", err)
+	}
+	m := regexp.MustCompile(`setupVersion\s*=\s*(\d+)`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("setupVersion not found in schema.go")
+	}
+	n, _ := strconv.Atoi(string(m[1]))
+	return n
 }

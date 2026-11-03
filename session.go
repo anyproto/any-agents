@@ -17,6 +17,15 @@ import (
 // share` copies the page into a collab space.
 
 func sessionById(c *Client, sp *Space, sid string) map[string]any {
+	// The session page's own id or link (what the session-start context
+	// prints) names it as well as the harness session id.
+	if strings.HasPrefix(sid, "any://") || strings.HasPrefix(sid, "bafy") {
+		row, err := c.GetObject(sp.Id, parseObjectId(sid))
+		if err != nil || !sp.isA(row, "session") {
+			return nil
+		}
+		return row
+	}
 	rows, err := c.QueryObjects(sp.Id, Query{
 		Filter: bundleFilter(sp, "session", map[string]any{propPath(sp, "session", "sessionId"): sid}), Limit: 1})
 	if err != nil || len(rows) == 0 {
