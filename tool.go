@@ -96,7 +96,7 @@ func (t *claudeTool) MemoryDir(projectDir string) string {
 	return filepath.Join(t.Home(), "projects", b.String(), "memory")
 }
 
-func (t *claudeTool) SessionEnv() string { return "CLAUDE_SESSION_ID" }
+func (t *claudeTool) SessionEnv() string { return "CLAUDE_CODE_SESSION_ID" }
 
 // Version runs `claude --version` once (bounded); empty when absent.
 func (t *claudeTool) Version() string {

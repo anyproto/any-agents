@@ -2102,7 +2102,7 @@ type runOpts struct {
 	home     string // sandbox HOME; "" = homeA
 	dir      string // working directory; "" = projDir
 	stdin    string
-	sid      string // CLAUDE_SESSION_ID
+	sid      string // CLAUDE_CODE_SESSION_ID
 	extraEnv []string
 	wantFail bool
 	member   bool // run as the second member: homeM, addrB, its own private space
@@ -2138,7 +2138,7 @@ func execCLI(o runOpts, args ...string) (stdout, stderr string, err error) {
 		"ANY_AGENTS_ADDR=" + server,
 	}, o.extraEnv...)
 	if o.sid != "" {
-		cmd.Env = append(cmd.Env, "CLAUDE_SESSION_ID="+o.sid)
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_SESSION_ID="+o.sid)
 	}
 	if o.stdin != "" {
 		cmd.Stdin = strings.NewReader(o.stdin)

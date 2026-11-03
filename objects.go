@@ -121,12 +121,18 @@ func currentContext(c *Client, st *State, sp *Space, sessionFlag, projectFlag st
 	var ci ctxInfo
 	cwd, _ := os.Getwd()
 	ci.scope = projectFlag
-	if sid := resolveSession(st, sessionFlag); sid != "" {
+	if sid, exact := resolveSession(st, sessionFlag); sid != "" {
 		if row := sessionById(c, st.private(), sid); row != nil {
-			ci.sessionId, _ = row["id"].(string)
-			if ci.scope == "" {
-				if pid := firstLink(row, st.private(), "session", "project"); pid != "" {
-					ci.scope = projectKey(c, st.private(), pid)
+			scope := ""
+			if pid := firstLink(row, st.private(), "session", "project"); pid != "" {
+				scope = projectKey(c, st.private(), pid)
+			}
+			// The last-seen session may belong to another agent session on
+			// this machine: trust it only when it works in the cwd's repo.
+			if exact || scope == "" || scope == resolveScope(cwd) {
+				ci.sessionId, _ = row["id"].(string)
+				if ci.scope == "" {
+					ci.scope = scope
 				}
 			}
 		}
@@ -617,7 +623,7 @@ func taskSetStatus(c *Client, st *State, sp *Space, id, status, sessionFlag stri
 			tp["handledBy"] = linkList([]string{sp.MachineObjectId})
 		}
 		if sp.Kind == kindPrivate {
-			if sid := resolveSession(st, sessionFlag); sid != "" {
+			if sid, _ := resolveSession(st, sessionFlag); sid != "" {
 				if srow := sessionById(c, sp, sid); srow != nil {
 					tp["handledIn"] = linkList([]string{srow["id"].(string)})
 					noteSessionLinear(c, st, srow["id"].(string), linkList(linksOf(row, sp.owner("doc"), sp.prop("doc", "linear"))), sp)
@@ -753,7 +759,7 @@ func cmdPlan(args []string) {
 			pp["approvedAt"] = dateVal(time.Now())
 		} else if sp.Kind == kindPrivate {
 			pp["executedBy"] = linkList([]string{sp.MachineObjectId})
-			if sid := resolveSession(st, ""); sid != "" {
+			if sid, _ := resolveSession(st, ""); sid != "" {
 				if row := sessionById(c, sp, sid); row != nil {
 					_ = addRelation(c, sp, id, "plan", "executedIn", row["id"].(string))
 				}
@@ -833,7 +839,7 @@ func planAdd(c *Client, st *State, sp *Space, args []string) {
 	}
 	sessionObj := ""
 	if sp.Kind == kindPrivate {
-		if sid := resolveSession(st, ""); sid != "" {
+		if sid, _ := resolveSession(st, ""); sid != "" {
 			if row := sessionById(c, sp, sid); row != nil {
 				sessionObj, _ = row["id"].(string)
 			}

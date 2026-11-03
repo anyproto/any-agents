@@ -128,6 +128,7 @@ func cmdMemory(args []string) {
 				fmt.Printf("%s shared to %s as %s\n", it.item.Slug, sp.Name, it.item.Id())
 			}
 		}
+		refreshProjectCounts(c, sp)
 		if len(rejected) > 0 {
 			os.Exit(1)
 		}

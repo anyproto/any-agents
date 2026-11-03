@@ -208,7 +208,7 @@ func cmdSession(args []string) {
 		}
 		return
 	}
-	sid := resolveSession(st, get("s"))
+	sid, _ := resolveSession(st, get("s"))
 	row := sessionById(c, sp, sid)
 	if row == nil {
 		fatal(fmt.Errorf("no session object for %q (pass -s <id>)", sid))

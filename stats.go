@@ -142,7 +142,7 @@ func cmdFeedback(args []string) {
 		machine := hostName()
 		id = fmt.Sprintf("%s:%d", machine, time.Now().UnixMilli())
 		fields["machine"] = machine
-		if s := resolveSession(st, fs.Lookup("s").Value.String()); s != "" {
+		if s, _ := resolveSession(st, fs.Lookup("s").Value.String()); s != "" {
 			fields["session"] = s
 		}
 	} else {

@@ -616,7 +616,7 @@ func pushMemory(c *Client, sp *Space, projectDir string) error {
 }
 
 // refreshProjectCounts writes every project's memory count from the
-// records (used after a bulk import).
+// records (after a bulk import or a share into the space).
 func refreshProjectCounts(c *Client, sp *Space) {
 	rows, err := c.Aggregate(sp.Id, sp.owner("app"), sp.coll(dsMemories), []map[string]any{
 		{"$match": map[string]any{"kind": map[string]any{"$ne": kindRetracted}}},

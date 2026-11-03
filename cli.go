@@ -96,15 +96,16 @@ func spaceOf(st *State, flag string) *Space {
 }
 
 // resolveSession picks the session id: flag → the tool's session env var
-// → the last seen.
-func resolveSession(st *State, flag string) string {
+// → the last seen on this machine. exact is false for the last seen,
+// which may belong to another agent session.
+func resolveSession(st *State, flag string) (id string, exact bool) {
 	if flag != "" {
-		return flag
+		return flag, true
 	}
 	if v := os.Getenv(currentTool().SessionEnv()); v != "" {
-		return v
+		return v, true
 	}
-	return st.LastSessionId
+	return st.LastSessionId, false
 }
 
 func trunc(s string, n int) string {
