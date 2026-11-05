@@ -2189,6 +2189,34 @@ func testPromptHook(t *testing.T) {
 	if ctx := promptHook(t, sidP, "/help"); ctx != "" {
 		t.Errorf("a slash command triggered auto-recall:\n%s", ctx)
 	}
+
+	// another project's memories: a workflow rule travels, a project note stays home
+	const other = "agents-e2e-elsewhere"
+	apiPost(t, "/v1/spaces/"+spaceId+"/upsert", map[string]any{
+		"objectId": ps.owner("app"), "dataset": ps.coll("memories"),
+		"records": []map[string]any{
+			{"id": other + ":flombastic-rule", "fields": map[string]any{"scope": other, "slug": "flombastic-rule", "kind": "feedback",
+				"title": "Flombastic verbs get a kibble review", "body": "Flombastic verbs always get a kibble review before merge.", "links": []string{}, "origin": "e2e"}},
+			{"id": other + ":flombastic-parser", "fields": map[string]any{"scope": other, "slug": "flombastic-parser", "kind": "project",
+				"title": "Where the flombastic parser lives", "body": "The flombastic parser lives in pkg/flomb and panics on empty input.", "links": []string{}, "origin": "e2e"}},
+		},
+	}, nil)
+	travel := "What do I need to know about flombastic verbs and the flombastic parser before I touch them?"
+	waitFor(t, 30*time.Second, "the other project's memories to clear the recall gate", func() bool {
+		hits = searchJSON(t, travel)
+		found := 0
+		for _, h := range hits {
+			if h.Score >= ragMinScore && (h.RecordId == other+":flombastic-rule" || h.RecordId == other+":flombastic-parser") {
+				found++
+			}
+		}
+		return found == 2
+	})
+	ctx := promptHook(t, sidP, travel)
+	mustContain(t, ctx, other+":flombastic-rule", "another project's feedback memory is recalled")
+	if strings.Contains(ctx, other+":flombastic-parser") {
+		t.Errorf("another project's project memory was recalled:\n%s", ctx)
+	}
 }
 
 // ragMinScore mirrors the hook's default gate (ANY_AGENTS_RAG_MIN).

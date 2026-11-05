@@ -184,6 +184,7 @@ func hookPrompt(tool Tool) {
 		return
 	}
 	seen := loadRagSeen(in.SessionId)
+	scope := resolveScope(in.Cwd)
 	type hit struct {
 		sp *Space
 		h  SearchHit
@@ -205,7 +206,7 @@ func hookPrompt(tool Tool) {
 			if err != nil {
 				return
 			}
-			for _, h := range recallPick(sp, res.Hits, ragMinScore(), seen, 3) {
+			for _, h := range recallPick(c, sp, scope, res.Hits, ragMinScore(), seen, 3) {
 				results[i] = append(results[i], hit{sp, h})
 			}
 		}(i, sp)
@@ -222,6 +223,18 @@ func hookPrompt(tool Tool) {
 		return
 	}
 	sort.SliceStable(picked, func(i, j int) bool { return picked[i].h.Score > picked[j].h.Score })
+	// One body excerpt per prompt across all spaces, the best-scoring one.
+	kept, excerpts := picked[:0], 0
+	for _, p := range picked {
+		if p.h.Dataset == "editor_blocks" {
+			if excerpts == 1 {
+				continue
+			}
+			excerpts++
+		}
+		kept = append(kept, p)
+	}
+	picked = kept
 	if len(picked) > 3 {
 		picked = picked[:3]
 	}
@@ -311,10 +324,14 @@ func ragMinScore() float64 {
 // recallPick applies the injection gate: threshold, dataset allowlist
 // (memories, config files, feedback notes and document bodies — property
 // and name hits are noise, and the app's status page is a digest of
-// everything else), unseen, capped. Shared with eval so the simulation
-// stays faithful.
-func recallPick(sp *Space, hits []SearchHit, minScore float64, seen map[string]bool, cap int) []SearchHit {
+// everything else), unseen, capped. Another project's memory is injected
+// only as a workflow rule (kind user or feedback); its project and
+// reference memories describe that repo and are noise elsewhere. One body
+// excerpt per space: excerpts are long and rarely acted on. Shared with
+// eval so the simulation stays faithful.
+func recallPick(c *Client, sp *Space, scope string, hits []SearchHit, minScore float64, seen map[string]bool, cap int) []SearchHit {
 	var picked []SearchHit
+	excerpts := 0
 	for _, h := range hits {
 		if h.Score < minScore || (seen != nil && seen[h.Dataset+"/"+h.RecordId]) {
 			continue
@@ -322,18 +339,46 @@ func recallPick(sp *Space, hits []SearchHit, minScore float64, seen map[string]b
 		if h.ObjectId == sp.owner("app") && h.Dataset == "editor_blocks" {
 			continue
 		}
-		if h.Dataset == sp.coll(dsMemories) && strings.HasPrefix(strings.TrimSpace(h.Data), retractedTitle) {
-			continue // a retracted shared memory
-		}
 		switch h.Dataset {
-		case sp.coll(dsMemories), sp.coll(dsConfig), sp.coll(dsFeedback), "editor_blocks":
-			picked = append(picked, h)
+		case sp.coll(dsMemories):
+			if strings.HasPrefix(strings.TrimSpace(h.Data), retractedTitle) {
+				continue // a retracted shared memory
+			}
+			if !memoryTravels(c, sp, h, scope) {
+				continue
+			}
+		case sp.coll(dsConfig), sp.coll(dsFeedback):
+		case "editor_blocks":
+			if excerpts == 1 {
+				continue
+			}
+			excerpts++
+		default:
+			continue
 		}
+		picked = append(picked, h)
 		if len(picked) == cap {
 			break
 		}
 	}
 	return picked
+}
+
+// memoryTravels reports whether a memory hit applies in a session of
+// project scope: always for the project's own memories, for another
+// project's only when it is a user or feedback memory. A record that
+// cannot be read is kept.
+func memoryTravels(c *Client, sp *Space, h SearchHit, scope string) bool {
+	memScope, _, ok := strings.Cut(h.RecordId, ":")
+	if !ok || scope == "" || memScope == scope {
+		return true
+	}
+	rows, err := c.QueryRecords(sp.Id, h.ObjectId, h.Dataset, map[string]any{"id": h.RecordId}, nil, 1)
+	if err != nil || len(rows) == 0 {
+		return true
+	}
+	kind, _ := rows[0]["kind"].(string)
+	return kind == "user" || kind == "feedback"
 }
 
 // hitLabel names a hit for a human: "memory any:foo" or "doc 'Title'".

@@ -100,8 +100,10 @@ status page → stats flushed. Hooks never fail a session.
 Recall. Every prompt runs a hybrid search over the private space and
 every collab space; memories, config, feedback notes and document
 bodies above the threshold are injected once per session each, three
-at most, collab hits labelled with their space. `search --space` runs
-one query in one space.
+at most, collab hits labelled with their space. Another project's
+memories travel only as workflow rules (kinds user and feedback); one
+document-body excerpt per prompt. `search --space` runs one query in
+one space.
 
 Feedback. `feedback "<text>" --kind K [--ref id] [--space S]` files a
 searchable note: private for memories and the bridge, in a collab

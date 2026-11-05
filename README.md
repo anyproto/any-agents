@@ -292,6 +292,9 @@ because a deleted record id can never be reused.
 
 Recall injects only memories, config files, feedback notes and page
 bodies above the threshold, from the private space and the collab spaces.
+Another project's memories travel only as workflow rules (kinds `user`
+and `feedback`); its `project` and `reference` memories stay home. One
+page-body excerpt per prompt.
 
 ## Telemetry, feedback, eval
 

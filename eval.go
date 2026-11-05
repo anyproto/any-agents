@@ -36,6 +36,8 @@ func cmdEval(args []string) {
 	}
 	c := NewClient()
 	sp := mustSetup(c).private()
+	cwd, _ := os.Getwd()
+	scope := resolveScope(cwd)
 
 	var pos, hit1, hit3, injected int
 	var mrr float64
@@ -46,7 +48,7 @@ func cmdEval(args []string) {
 			fatal(err)
 		}
 		// The hook's own gate, so the simulation stays faithful.
-		wouldInject := recallPick(sp, res.Hits, *minScore, nil, 3)
+		wouldInject := recallPick(c, sp, scope, res.Hits, *minScore, nil, 3)
 		if len(e.Expect) == 0 {
 			negs++
 			if len(wouldInject) > 0 {
