@@ -646,6 +646,9 @@ func checkSpaceSetup(t *testing.T, sp *spaceState) {
 			t.Errorf("%s %s: want one `default` dataview, got %s", sp.Name, name, mustJSON(dvs))
 			continue
 		}
+		if got, _ := dvs[0]["setupVersion"].(float64); int(got) != wantSetupVersion(t) {
+			t.Errorf("%s %s: dataview setupVersion %v, want %d", sp.Name, name, dvs[0]["setupVersion"], wantSetupVersion(t))
+		}
 		views := apiRecordsIn(t, sp.Id, host, "views", nil)
 		byViewId := map[string]map[string]any{}
 		for _, v := range views {

@@ -352,7 +352,9 @@ func ensureProject(c *Client, sp *Space, scope string) (string, error) {
 
 // ensureViews resolves one dataview object per browsable collection or
 // type and upserts the well-known views so every machine converges on
-// the same tables, newest first except Tasks. layoutSettings column ids are bare property ids
+// the same tables. A dataview records the setup version that wrote its
+// views, so a machine on an older binary leaves newer views alone instead
+// of flipping them back. layoutSettings column ids are bare property ids
 // (any-ui's convention); query paths are the server's <ownerId>.<propId>.
 func ensureViews(c *Client, sp *Space) error {
 	type view struct {
@@ -361,17 +363,21 @@ func ensureViews(c *Client, sp *Space) error {
 		filter   map[string]any
 		cols     []string
 	}
-	newest := []string{"-createdAt"} // every view but the task ones: newest first
+	// Newest first everywhere; an object with a date of its own (written,
+	// started, opened) sorts by that date, since imported objects all share
+	// one creation time, with createdAt as the tie-break.
+	newest := []string{"-createdAt"}
+	byDate := func(bundle, xkey string) []string { return []string{"-" + propPath(sp, bundle, xkey), "-createdAt"} }
 	open := map[string]any{propPath(sp, "task", "status"): map[string]any{"$in": []string{"todo", "in_progress"}}}
 	views := map[string]struct {
 		name  string
 		views []view
 	}{
-		"doc": {"Docs", []view{{"default", "Table", newest, nil, []string{"kind", "project", "author", "linear", "pr", "originSession", "date"}}}},
+		"doc": {"Docs", []view{{"default", "Table", byDate("doc", "date"), nil, []string{"kind", "project", "author", "linear", "pr", "originSession", "date"}}}},
 		"task": {"Tasks", []view{
 			{"default", "Open", []string{"-modifiedAt"}, open, []string{"status", "priority", "assignee", "linearKey", "project", "target", "due"}},
 			{"all", "All", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"status", "priority", "assignee", "linearKey", "handledBy", "handledIn"}}}},
-		"session": {"Sessions", []view{{"default", "Table", newest, nil, []string{"status", "tool", "project", "machine", "owner", "linear", "startedAt", "summary"}}}},
+		"session": {"Sessions", []view{{"default", "Table", byDate("session", "startedAt"), nil, []string{"status", "tool", "project", "machine", "owner", "linear", "startedAt", "summary"}}}},
 		"project": {"Projects", []view{{"default", "Table", newest, nil, []string{"status", "memories", "lastActivity"}}}},
 		"machine": {"Machines", []view{{"default", "Table", newest, nil, []string{"status", "lastSeen", "os", "tools"}}}},
 		"linear":  {"Linear issues", []view{{"default", "Table", newest, nil, []string{"key", "status", "priority", "team", "assignee", "dueDate", "syncedAt"}}}},
@@ -382,8 +388,8 @@ func ensureViews(c *Client, sp *Space) error {
 			name  string
 			views []view
 		}{"Collabs", []view{
-			{"default", "Open", newest, active, []string{"status", "requester", "assignees", "project", "pr", "date"}},
-			{"all", "All", newest, nil, []string{"status", "requester", "assignees", "project", "pr", "date", "resolvedAt"}}}}
+			{"default", "Open", byDate("collab", "date"), active, []string{"status", "requester", "assignees", "project", "pr", "date"}},
+			{"all", "All", byDate("collab", "date"), nil, []string{"status", "requester", "assignees", "project", "pr", "date", "resolvedAt"}}}}
 	}
 	if sp.has("release") {
 		views["release"] = struct {
@@ -396,6 +402,9 @@ func ensureViews(c *Client, sp *Space) error {
 		dv, err := ensureDataview(c, sp, name)
 		if err != nil {
 			return err
+		}
+		if viewsVersion(c, sp, dv) >= setupVersion {
+			continue
 		}
 		set := func(ds, id string, value map[string]any) error {
 			res, err := c.Modify(sp.Id, dv, ds, []ModifyRecord{{Id: id, Upsert: true,
@@ -430,8 +439,28 @@ func ensureViews(c *Client, sp *Space) error {
 				return err
 			}
 		}
+		if err := set("dataviews", "default", map[string]any{"name": v.name, "pos": "a0", "setupVersion": setupVersion}); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// viewsVersion is the setup version recorded on a dataview's default
+// record, 0 when none.
+func viewsVersion(c *Client, sp *Space, dv string) int {
+	rows, err := c.QueryRecords(sp.Id, dv, "dataviews", nil, nil, 10)
+	if err != nil {
+		return 0
+	}
+	for _, r := range rows {
+		if id, _ := r["id"].(string); id == "default" || strings.HasSuffix(id, "/default") {
+			if v, ok := r["setupVersion"].(float64); ok {
+				return int(v)
+			}
+		}
+	}
+	return 0
 }
 
 // ensureDataview resolves the dataview object hosted by a bundle's root
