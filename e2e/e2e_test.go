@@ -1488,10 +1488,22 @@ func testCollabSpace(t *testing.T) {
 		writeFile(t, noDod, "# No DoD\n\nJust a question.\n")
 		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "open", noDod, "--space", teamName)
 		mustContain(t, errOut, "definition of done", "collab open without a definition of done")
-		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "open", reqPath, "--space", teamName)
+		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "open", reqPath, "--space", teamName, "--announce")
 		collabId := linkId(t, out)
 		collabLink := "any://o/" + teamId + "/" + collabId
 		mustContain(t, out, collabLink, "collab open prints the collab's link")
+
+		// --announce posts into the general chat with the page attached
+		var gen map[string]any
+		apiPost(t, "/v1/catalog/general-chat/setup", map[string]string{"spaceId": teamId}, &gen)
+		bundles, _ := gen["bundles"].([]any)
+		if len(bundles) == 0 {
+			t.Fatalf("no general chat in the team space: %s", mustJSON(gen))
+		}
+		generalChat, _ := bundles[0].(map[string]any)["bundle"].(map[string]any)["rootId"].(string)
+		mustAnnounced(t, teamId, generalChat, "Help wanted: E2E Help Request", collabLink)
+		out, _ = runCLI(t, runOpts{sid: sidA, stdin: "Team notes.\n"}, "release", "add", "-", "--project", "any", "--version", "v9.9.8", "--space", teamName, "--announce")
+		mustAnnounced(t, teamId, generalChat, "any v9.9.8 is out", "any://o/"+teamId+"/"+linkId(t, out))
 		row = apiObject(t, collabId, teamId)
 		c := ts.owner("collab")
 		mustEqual(t, typeOf(row), c, "collab object type")
@@ -2877,6 +2889,27 @@ var linkRe = regexp.MustCompile(`any://o/[^/\s]+/([A-Za-z0-9._-]+)`)
 
 // linkId pulls the object id out of the first any://o/<space>/<id> link in
 // a command's output.
+// mustAnnounced finds the general-chat message whose text contains what
+// and checks that it carries link as an attachment.
+func mustAnnounced(t *testing.T, space, chatId, what, link string) {
+	t.Helper()
+	for _, m := range apiRecordsIn(t, space, chatId, "chat_messages", nil) {
+		text, _ := m["text"].(string)
+		if !strings.Contains(text, what) {
+			continue
+		}
+		atts, _ := m["attachments"].(map[string]any)
+		for _, a := range atts {
+			if am, _ := a.(map[string]any); am["link"] == link {
+				return
+			}
+		}
+		t.Errorf("announcement %q has no attachment %s: %s", what, link, mustJSON(m))
+		return
+	}
+	t.Errorf("no announcement containing %q in the general chat", what)
+}
+
 func linkId(t *testing.T, out string) string {
 	t.Helper()
 	m := linkRe.FindStringSubmatch(out)

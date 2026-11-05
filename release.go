@@ -258,10 +258,12 @@ func announceRelease(c *Client, st *State, sp *Space, id, name, url string) erro
 		return fmt.Errorf("no general chat in %s", sp.Name)
 	}
 	text := fmt.Sprintf("**%s is out.** Release notes: %s", name, globalLink(sp.Id, id))
+	attachments := []map[string]any{linkAttachment(globalLink(sp.Id, id))}
 	if url != "" {
 		text += "\n" + url
+		attachments = append(attachments, linkAttachment(url))
 	}
-	_, err = c.ChatSend(sp.Id, res[0].Bundle.RootId, text, agentEnvelope(c, st, sp))
+	_, err = c.ChatSend(sp.Id, res[0].Bundle.RootId, text, agentEnvelope(c, st, sp), attachments...)
 	return err
 }
 

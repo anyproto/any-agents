@@ -667,11 +667,20 @@ type WriteResult struct {
 
 // ChatSend posts one message; agent marks it agent-authored so the
 // owner's own devices count it unread.
-func (c *Client) ChatSend(space, objectId, text string, agent map[string]any) (*WriteResult, error) {
+// ChatSend posts a message; attachments are {id: {type, link}} entries
+// the clients render as cards under the text.
+func (c *Client) ChatSend(space, objectId, text string, agent map[string]any, attachments ...map[string]any) (*WriteResult, error) {
 	var out WriteResult
 	body := map[string]any{"text": text}
 	if agent != nil {
 		body["agent"] = agent
+	}
+	if len(attachments) > 0 {
+		all := map[string]any{}
+		for i, a := range attachments {
+			all[fmt.Sprintf("a%d", i+1)] = a
+		}
+		body["attachments"] = all
 	}
 	return &out, c.do("POST", "/v1/spaces/"+seg(space)+"/objects/"+seg(objectId)+"/chat/messages", body, &out)
 }

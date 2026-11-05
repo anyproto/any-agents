@@ -302,7 +302,7 @@ func announceCollab(c *Client, st *State, sp *Space, id, name string) error {
 		return fmt.Errorf("no general chat in %s", sp.Name)
 	}
 	text := fmt.Sprintf("Help wanted: %s\n%s\n`any-agents collab join %s`", name, globalLink(sp.Id, id), globalLink(sp.Id, id))
-	_, err = c.ChatSend(sp.Id, res[0].Bundle.RootId, text, agentEnvelope(c, st, sp))
+	_, err = c.ChatSend(sp.Id, res[0].Bundle.RootId, text, agentEnvelope(c, st, sp), linkAttachment(globalLink(sp.Id, id)))
 	return err
 }
 

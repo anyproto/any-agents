@@ -43,6 +43,11 @@ func bundleFilter(sp *Space, bundle string, extra ...map[string]any) map[string]
 	return typeFilter(sp.owner(bundle), extra...)
 }
 
+// linkAttachment is a chat attachment that opens a page or a URL.
+func linkAttachment(link string) map[string]any {
+	return map[string]any{"type": "link", "link": link}
+}
+
 func propPath(sp *Space, bundle, xkey string) string {
 	return sp.owner(bundle) + "." + sp.prop(bundle, xkey)
 }
