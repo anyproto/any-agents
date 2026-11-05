@@ -352,7 +352,7 @@ func ensureProject(c *Client, sp *Space, scope string) (string, error) {
 
 // ensureViews resolves one dataview object per browsable collection or
 // type and upserts the well-known views so every machine converges on
-// the same tables. layoutSettings column ids are bare property ids
+// the same tables, newest first except Tasks. layoutSettings column ids are bare property ids
 // (any-ui's convention); query paths are the server's <ownerId>.<propId>.
 func ensureViews(c *Client, sp *Space) error {
 	type view struct {
@@ -361,19 +361,20 @@ func ensureViews(c *Client, sp *Space) error {
 		filter   map[string]any
 		cols     []string
 	}
+	newest := []string{"-createdAt"} // every view but the task ones: newest first
 	open := map[string]any{propPath(sp, "task", "status"): map[string]any{"$in": []string{"todo", "in_progress"}}}
 	views := map[string]struct {
 		name  string
 		views []view
 	}{
-		"doc": {"Docs", []view{{"default", "Table", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"kind", "project", "author", "linear", "pr", "originSession", "date"}}}},
+		"doc": {"Docs", []view{{"default", "Table", newest, nil, []string{"kind", "project", "author", "linear", "pr", "originSession", "date"}}}},
 		"task": {"Tasks", []view{
 			{"default", "Open", []string{"-modifiedAt"}, open, []string{"status", "priority", "assignee", "linearKey", "project", "target", "due"}},
 			{"all", "All", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"status", "priority", "assignee", "linearKey", "handledBy", "handledIn"}}}},
-		"session": {"Sessions", []view{{"default", "Table", []string{"-" + propPath(sp, "session", "startedAt")}, nil, []string{"status", "tool", "project", "machine", "owner", "linear", "startedAt", "summary"}}}},
-		"project": {"Projects", []view{{"default", "Table", []string{"any.name"}, nil, []string{"status", "memories", "lastActivity"}}}},
-		"machine": {"Machines", []view{{"default", "Table", []string{"any.name"}, nil, []string{"status", "lastSeen", "os", "tools"}}}},
-		"linear":  {"Linear issues", []view{{"default", "Table", []string{propPath(sp, "linear", "key")}, nil, []string{"key", "status", "priority", "team", "assignee", "dueDate", "syncedAt"}}}},
+		"session": {"Sessions", []view{{"default", "Table", newest, nil, []string{"status", "tool", "project", "machine", "owner", "linear", "startedAt", "summary"}}}},
+		"project": {"Projects", []view{{"default", "Table", newest, nil, []string{"status", "memories", "lastActivity"}}}},
+		"machine": {"Machines", []view{{"default", "Table", newest, nil, []string{"status", "lastSeen", "os", "tools"}}}},
+		"linear":  {"Linear issues", []view{{"default", "Table", newest, nil, []string{"key", "status", "priority", "team", "assignee", "dueDate", "syncedAt"}}}},
 	}
 	if sp.has("collab") {
 		active := map[string]any{propPath(sp, "collab", "status"): map[string]any{"$in": []string{"request", "in_progress"}}}
@@ -381,14 +382,14 @@ func ensureViews(c *Client, sp *Space) error {
 			name  string
 			views []view
 		}{"Collabs", []view{
-			{"default", "Open", []string{"-" + propPath(sp, "collab", "date")}, active, []string{"status", "requester", "assignees", "project", "pr", "date"}},
-			{"all", "All", []string{"-" + propPath(sp, "collab", "date")}, nil, []string{"status", "requester", "assignees", "project", "pr", "date", "resolvedAt"}}}}
+			{"default", "Open", newest, active, []string{"status", "requester", "assignees", "project", "pr", "date"}},
+			{"all", "All", newest, nil, []string{"status", "requester", "assignees", "project", "pr", "date", "resolvedAt"}}}}
 	}
 	if sp.has("release") {
 		views["release"] = struct {
 			name  string
 			views []view
-		}{"Releases", []view{{"default", "Table", []string{"-createdAt"}, nil,
+		}{"Releases", []view{{"default", "Table", newest, nil,
 			[]string{"project", "version", "released", "breaking", "apiChanges", "url", "includes", "author"}}}}
 	}
 	for name, v := range views {
