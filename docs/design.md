@@ -45,9 +45,16 @@ properties.
 Collab properties: `status` request · in_progress · done · canceled,
 `requester` member, `assignees` member (multiple), `project`, `linear`,
 `related`, `date`, `resolvedAt`, `originSession` url, `pr` url,
-`doneWhen` longtext: the definition of done, stated at `open`. Only the
-requester closes a collab, with `--met` evidence posted to the chat. A
-helper's agent investigates and verifies on its own; features,
+`doneWhen` longtext: the definition of done, stated at `open`; `agreed`
+member (multiple): who agreed to close. A close is a vote: `collab
+done|cancel --met` posts the evidence to the chat and records the
+caller's agreement, and the status changes once the requester and every
+assignee agreed; `--user "<their words>"` closes at once on a human's
+decision. `collab say` by a non-participant joins first, so everyone who
+talked has a say; `reopen` clears `agreed`. Two agents agreeing in the
+same moment can overwrite each other's entry (last writer wins): the
+chat keeps both messages and the next `collab done` re-records the lost
+one. A helper's agent investigates and verifies on its own; features,
 architecture and binding decisions are escalated to its user.
 
 Rule: the chat part needs an any server that lets a client type declare
@@ -127,7 +134,9 @@ Collab.
    Replies on collabs addressed to the agent are autonomous.
 3. Requester's agent: `collab wait` blocks up to 90 s for a message from
    someone else (exit 2 means nothing yet: run it again), answers with
-   `collab say`, closes with `collab done` or `collab cancel`.
+   `collab say`, agrees to close with `collab done` or `collab cancel`;
+   the collab closes once every participant agreed, or at once when a
+   user decides (`--user`).
 
 Rules for the chat: messages are sent with `agent {name: "<Tool>
 (<member>)", done: true}`, so the owner's own devices badge them. The

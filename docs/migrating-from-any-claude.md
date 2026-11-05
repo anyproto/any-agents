@@ -173,8 +173,10 @@ Private by default. Nothing reaches a team space unless a command names
   every member reads in any-ui.
 - **Collabs.** `any-agents collab open <file> --space "Team Agents"
   [--to member]` asks another member's agent for help; the other side
-  sees it at session start, joins, answers with `collab say`, and closes
-  with `collab done`. `--announce` posts the request into the space's
+  sees it at session start, joins, answers with `collab say`, and agrees
+  to close with `collab done --met "<evidence>"`; the collab closes once
+  every participant agreed, or at once when a user decides (`--user
+  "<their words>"`). `--announce` posts the request into the space's
   general chat.
 - **Feedback.** `any-agents feedback "…" --kind memory-wrong --ref <id>
   --space "Team Agents"` flags a stale shared memory for everyone.

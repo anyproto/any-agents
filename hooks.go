@@ -293,7 +293,7 @@ func unreadCollabNotice(c *Client, st *State, sessionId string) string {
 		return ""
 	}
 	return "any-agents: unread replies on collab(s) you are part of: " + strings.Join(items, "; ") +
-		" — read with `any-agents collab show <link>`, answer with `collab say`, then keep `collab wait <link>` running until the requester closes it (as the requester: `collab done <link> --met \"<evidence>\"` once the definition of done holds).\n"
+		" — read with `any-agents collab show <link>`, answer with `collab say`, then keep `collab wait <link>` running until the collab closes: once your part is done, `collab done <link> --met \"<evidence>\"` records your agreement, and it closes when every participant agreed or a user decides (`--user \"<their words>\"`).\n"
 }
 
 // hookStop holds the agent once per turn when a collab this session took

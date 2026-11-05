@@ -84,6 +84,7 @@ func cmdCollab(args []string) {
 			fs.Duration("timeout", 90*time.Second, "how long wait blocks for a reply (exit 2 on timeout: run it again to keep waiting)")
 			fs.Bool("all", false, "wait: return on any message, own ones included")
 			fs.String("met", "", "done: how the definition of done was met; cancel/reopen: the reason (posted to the chat)")
+			fs.String("user", "", "done/cancel: close at once on the user's decision, quoting them; nobody else's agreement is needed")
 		})
 		if len(pos) < 1 {
 			fatal(fmt.Errorf("collab %s <id>", args[0]))
@@ -104,7 +105,8 @@ func cmdCollab(args []string) {
 			_ = renderStatusPage(c, sp)
 		case "reopen":
 			// A closed request comes back as in_progress (request when
-			// nobody has joined); the requester or a helper may do it.
+			// nobody has joined) and the agreements to close are dropped;
+			// the requester or a helper may do it.
 			row, err := c.GetObject(sp.Id, id)
 			if err != nil {
 				fatal(err)
@@ -119,7 +121,7 @@ func cmdCollab(args []string) {
 			if len(assignees) == 0 {
 				status = "request"
 			}
-			pp := map[string]any{"status": []string{status}, "resolvedAt": nil}
+			pp := map[string]any{"status": []string{status}, "resolvedAt": nil, "agreed": nil}
 			if err := c.SetProperties(sp.Id, id, t, props(sp, "collab", pp)); err != nil {
 				fatal(err)
 			}
@@ -131,40 +133,11 @@ func cmdCollab(args []string) {
 			_ = renderStatusPage(c, sp)
 			fmt.Printf("%s  %s\n", globalLink(sp.Id, id), status)
 		case "done", "cancel":
-			// The requester closes: the helper reports in the chat and
-			// leaves the request open.
-			row, err := c.GetObject(sp.Id, id)
-			if err != nil {
-				fatal(err)
-			}
-			t := sp.owner("collab")
-			if requester := firstMember(row, t, sp.prop("collab", "requester")); requester != "" && requester != st.me() {
-				fatal(fmt.Errorf("only the requester (%s) closes a collab — say in its chat that your part is done", memberIndex(c, sp)[identityOf(requester)]))
-			}
-			status := map[string]string{"done": "done", "cancel": "canceled"}[args[0]]
 			met := strings.TrimSpace(fs.Lookup("met").Value.String())
-			if args[0] == "done" {
-				if met == "" {
-					dod := strOf(row, t, sp.prop("collab", "doneWhen"))
-					if dod != "" {
-						dod = " (done when: " + dod + ")"
-					}
-					fatal(fmt.Errorf("collab done needs --met \"<how the definition of done was met>\"%s", dod))
-				}
-				if err := collabSay(c, st, sp, id, "Done: "+met); err != nil {
-					fatal(err)
-				}
-			} else if met != "" {
-				if err := collabSay(c, st, sp, id, "Canceled: "+met); err != nil {
-					fatal(err)
-				}
-			}
-			pp := map[string]any{"status": []string{status}, "resolvedAt": dateVal(time.Now())}
-			if err := c.SetProperties(sp.Id, id, sp.owner("collab"), props(sp, "collab", pp)); err != nil {
+			user := strings.TrimSpace(fs.Lookup("user").Value.String())
+			if err := collabClose(c, st, sp, id, args[0], met, user); err != nil {
 				fatal(err)
 			}
-			_ = renderStatusPage(c, sp)
-			fmt.Printf("%s  %s\n", globalLink(sp.Id, id), status)
 		case "say":
 			text, err := textArg(pos[1:])
 			if err != nil {
@@ -173,10 +146,21 @@ func cmdCollab(args []string) {
 			if strings.TrimSpace(text) == "" {
 				fatal(fmt.Errorf("collab say <id> <text|file|->"))
 			}
+			// Talking in a collab makes me a participant whose agreement
+			// the close needs.
+			row, err := c.GetObject(sp.Id, id)
+			if err != nil {
+				fatal(err)
+			}
+			if !contains(collabParties(sp, row), st.me()) {
+				if err := collabJoin(c, st, sp, id); err != nil {
+					fatal(err)
+				}
+			}
 			if err := collabSay(c, st, sp, id, text); err != nil {
 				fatal(err)
 			}
-			fmt.Fprintf(os.Stderr, "any-agents: posted; now `any-agents collab wait %s` for the reply (exit 2 = none yet, run it again) until the requester closes the collab\n", globalLink(sp.Id, id))
+			fmt.Fprintf(os.Stderr, "any-agents: posted; now `any-agents collab wait %s` for the reply (exit 2 = none yet, run it again) until the collab closes; once your part is done, `collab done <link> --met \"<evidence>\"` records your agreement\n", globalLink(sp.Id, id))
 		case "wait":
 			timeout, _ := time.ParseDuration(fs.Lookup("timeout").Value.String())
 			msgs, closedAs, err := collabWait(c, st, sp, id, timeout, fs.Lookup("all").Value.String() == "true")
@@ -356,6 +340,9 @@ func collabList(c *Client, st *State, args []string) {
 			if len(names) > 0 {
 				fmt.Printf("  [%s]", strings.Join(names, ", "))
 			}
+			if agreed := membersOf(r, t, sp.prop("collab", "agreed")); len(agreed) > 0 && contains(collabOpen, choiceOf(r, t, sp.prop("collab", "status"))) {
+				fmt.Printf("  closing, waiting for %s", strings.Join(memberNames(members, collabWaiting(sp, r, agreed)), ", "))
+			}
 			fmt.Printf("  (%s)\n", sp.Name)
 		}
 	}
@@ -375,6 +362,13 @@ func collabShow(c *Client, st *State, sp *Space, id string, n int) {
 	fmt.Printf("# %s\n%s\nstatus=%s  requester=%s  assignees=%s  space=%s\n", nameOf(row), globalLink(sp.Id, id),
 		choiceOf(row, t, sp.prop("collab", "status")), members[identityOf(firstMember(row, t, sp.prop("collab", "requester")))],
 		strings.Join(names, ","), sp.Name)
+	if agreed := membersOf(row, t, sp.prop("collab", "agreed")); len(agreed) > 0 {
+		fmt.Printf("agreed to close: %s", strings.Join(memberNames(members, agreed), ","))
+		if waiting := collabWaiting(sp, row, agreed); len(waiting) > 0 {
+			fmt.Printf("  waiting for: %s", strings.Join(memberNames(members, waiting), ","))
+		}
+		fmt.Println()
+	}
 	if pr := strOf(row, t, sp.prop("collab", "pr")); pr != "" {
 		fmt.Printf("pr=%s\n", pr)
 	}
@@ -436,6 +430,117 @@ func collabSay(c *Client, st *State, sp *Space, id, text string) error {
 	}
 	fmt.Printf("%s  sent\n", globalLink(sp.Id, id))
 	return nil
+}
+
+// collabClose records my agreement to close the collab as done or
+// canceled, with the evidence posted to the chat, and closes it once every
+// participant (the requester and each assignee) agreed. A user's decision
+// (--user, quoting them) closes it at once: a human may end a collab
+// alone, an agent may not.
+func collabClose(c *Client, st *State, sp *Space, id, verb, met, user string) error {
+	row, err := c.GetObject(sp.Id, id)
+	if err != nil {
+		return err
+	}
+	t := sp.owner("collab")
+	if cur := choiceOf(row, t, sp.prop("collab", "status")); cur == "done" || cur == "canceled" {
+		return fmt.Errorf("collab is already %s (`collab reopen` undoes that)", cur)
+	}
+	status := map[string]string{"done": "done", "cancel": "canceled"}[verb]
+	label := map[string]string{"done": "Done", "cancel": "Canceled"}[verb]
+	link := globalLink(sp.Id, id)
+	if user != "" {
+		if err := collabSay(c, st, sp, id, label+" on the user's decision: "+user); err != nil {
+			return err
+		}
+		return closeCollab(c, sp, id, status, nil)
+	}
+	if met == "" {
+		hint := ""
+		if verb == "done" {
+			if dod := strOf(row, t, sp.prop("collab", "doneWhen")); dod != "" {
+				hint = " (done when: " + dod + ")"
+			}
+			return fmt.Errorf("collab done needs --met \"<how the definition of done was met>\"%s — or --user \"<their words>\" when your user decided to close it", hint)
+		}
+		return fmt.Errorf("collab cancel needs --met \"<why>\" — or --user \"<their words>\" when your user decided to close it")
+	}
+	parties := collabParties(sp, row)
+	if !contains(parties, st.me()) {
+		return fmt.Errorf("you are not part of this collab: `collab join %s` first — or --user \"<their words>\" when your user decided to close it", link)
+	}
+	agreed := addToLinks(membersOf(row, t, sp.prop("collab", "agreed")), st.me())
+	waiting := collabWaiting(sp, row, agreed)
+	text := label + ": " + met
+	if len(waiting) > 0 {
+		names := memberNames(memberIndex(c, sp), waiting)
+		verbs := "agrees"
+		if len(names) > 1 {
+			verbs = "agree"
+		}
+		text += fmt.Sprintf("\nCloses once %s %s: `any-agents collab %s %s --met \"…\"` — or say what is still open.", strings.Join(names, ", "), verbs, verb, link)
+	}
+	if err := collabSay(c, st, sp, id, text); err != nil {
+		return err
+	}
+	if len(waiting) == 0 {
+		return closeCollab(c, sp, id, status, agreed)
+	}
+	if err := c.SetProperties(sp.Id, id, t, props(sp, "collab", map[string]any{"agreed": agreed})); err != nil {
+		return err
+	}
+	_ = renderStatusPage(c, sp)
+	fmt.Printf("%s  agreed; closes once %s agreed too — keep `collab wait` running\n", link, strings.Join(memberNames(memberIndex(c, sp), waiting), ", "))
+	return nil
+}
+
+func closeCollab(c *Client, sp *Space, id, status string, agreed []string) error {
+	pp := map[string]any{"status": []string{status}, "resolvedAt": dateVal(time.Now())}
+	if agreed != nil {
+		pp["agreed"] = agreed
+	}
+	if err := c.SetProperties(sp.Id, id, sp.owner("collab"), props(sp, "collab", pp)); err != nil {
+		return err
+	}
+	_ = renderStatusPage(c, sp)
+	fmt.Printf("%s  %s\n", globalLink(sp.Id, id), status)
+	return nil
+}
+
+// collabParties is everyone whose agreement a close needs: the requester
+// and each assignee.
+func collabParties(sp *Space, row map[string]any) []string {
+	t := sp.owner("collab")
+	parties := membersOf(row, t, sp.prop("collab", "assignees"))
+	if r := firstMember(row, t, sp.prop("collab", "requester")); r != "" {
+		parties = addToLinks(parties, r)
+	}
+	return parties
+}
+
+// collabWaiting is the parties not in agreed.
+func collabWaiting(sp *Space, row map[string]any, agreed []string) []string {
+	var out []string
+	for _, p := range collabParties(sp, row) {
+		if !contains(agreed, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// memberNames maps identity links to member names (the identity when
+// the member is unknown).
+func memberNames(members map[string]string, links []string) []string {
+	var out []string
+	for _, l := range links {
+		if n := members[identityOf(l)]; n != "" {
+			out = append(out, n)
+		} else {
+			out = append(out, identityOf(l))
+		}
+	}
+	return out
 }
 
 // collabWait polls the chat until a message newer than the cursor
@@ -541,10 +646,10 @@ func collabDigest(c *Client, st *State) string {
 			}
 		}
 		if len(forMe) > 0 {
-			fmt.Fprintf(&b, "Collab space %s has %d help request(s) addressed to you: %s — `any-agents collab show <link>` reads one, `collab join` takes it; report in its chat and leave it open, the requester closes it. On your own: answer questions, check bugs, debug, run tests, review. A new feature, an API or architecture change, or a decision that binds the team: ask your user first and say in the chat that you are checking.\n", sp.Name, len(forMe), strings.Join(forMe, "; "))
+			fmt.Fprintf(&b, "Collab space %s has %d help request(s) addressed to you: %s — `any-agents collab show <link>` reads one, `collab join` takes it; report in its chat; when your part is done, `any-agents collab done <link> --met \"<evidence>\"` records your agreement, and the collab closes once every participant agreed or a user decides (`--user \"<their words>\"`). On your own: answer questions, check bugs, debug, run tests, review. A new feature, an API or architecture change, or a decision that binds the team: ask your user first and say in the chat that you are checking.\n", sp.Name, len(forMe), strings.Join(forMe, "; "))
 		}
 		if len(replies) > 0 {
-			fmt.Fprintf(&b, "Replies on your request(s) in %s: %s — read them with `collab show`; answer with `collab say`; close with `any-agents collab done <link> --met \"<evidence>\"` only once the definition of done is met, or when the user says so.\n", sp.Name, strings.Join(replies, "; "))
+			fmt.Fprintf(&b, "Replies on your request(s) in %s: %s — read them with `collab show`; answer with `collab say`; once the definition of done holds, `any-agents collab done <link> --met \"<evidence>\"` records your agreement, and the collab closes once every participant agreed; `--user \"<their words>\"` closes it at once when your user decides.\n", sp.Name, strings.Join(replies, "; "))
 		}
 		if len(requests) > 0 {
 			fmt.Fprintf(&b, "Collab space %s has %d open help request(s) nobody took: %s — `any-agents collab show <link>` reads one, `collab join` takes it.\n", sp.Name, len(requests), strings.Join(requests, "; "))
