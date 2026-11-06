@@ -184,12 +184,14 @@ func cmdDoc(args []string) {
 	case "add", "save":
 		docAdd(c, st, sp, args[1:], nil)
 	case "list":
-		docList(c, sp, args[1:])
+		for _, s := range listSpaces(st, sp, space) {
+			docList(c, s, args[1:], space == "")
+		}
 	case "show":
 		if len(args) < 2 {
 			fatal(fmt.Errorf("doc show <id>"))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		showObject(c, sp, id, false)
 	case "append":
 		if len(args) < 3 {
@@ -199,7 +201,7 @@ func cmdDoc(args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		if err := c.MarkdownAppend(sp.Id, id, body); err != nil {
 			fatal(err)
 		}
@@ -211,7 +213,7 @@ func cmdDoc(args []string) {
 		if len(pos) < 1 || fs.Lookup("old").Value.String() == "" {
 			fatal(fmt.Errorf("doc edit <id> --old S --new S"))
 		}
-		sp, id := objectIn(st, sp, pos[0])
+		sp, id := objectIn(c, st, sp, pos[0])
 		if err := c.MarkdownPatch(sp.Id, id, []MarkdownEdit{{
 			OldText: fs.Lookup("old").Value.String(), NewText: fs.Lookup("new").Value.String()}}); err != nil {
 			fatal(err)
@@ -220,7 +222,7 @@ func cmdDoc(args []string) {
 		if len(args) < 2 {
 			fatal(fmt.Errorf("doc archive <id>"))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		if err := c.SetProperties(sp.Id, id, sp.owner("doc"), props(sp, "doc", map[string]any{"archived": true})); err != nil {
 			fatal(err)
 		}
@@ -228,7 +230,7 @@ func cmdDoc(args []string) {
 		if len(args) < 3 {
 			fatal(fmt.Errorf("doc link <id> <objectId>"))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		targets, err := sameSpaceIds(sp, args[2])
 		if err != nil || len(targets) != 1 {
 			fatal(fmt.Errorf("doc link <id> <objectId in the same space>: %v", err))
@@ -281,14 +283,54 @@ func sameSpaceIds(sp *Space, csv string) ([]string, error) {
 
 // objectIn resolves an id argument: a link names its space, a bare id
 // is in the given one.
-func objectIn(st *State, sp *Space, ref string) (*Space, string) {
+// objectIn resolves a link to its space and id. A bare id is looked up
+// in the default space first, then in every other space set up here; an
+// id found nowhere stays with the default space, whose error names it.
+func objectIn(c *Client, st *State, sp *Space, ref string) (*Space, string) {
 	if spaceId := parseSpaceId(ref); spaceId != ref {
 		if other := st.space(spaceId); other != nil {
 			return other, parseObjectId(ref)
 		}
 		fatal(fmt.Errorf("space %s of %s is not set up here", spaceId, ref))
 	}
-	return sp, parseObjectId(ref)
+	id := parseObjectId(ref)
+	if _, err := c.GetObject(sp.Id, id); err == nil || !isCode(err, "object.not_found") {
+		return sp, id
+	}
+	for _, other := range append([]*Space{st.private()}, st.collabs()...) {
+		if other == nil || other.Id == sp.Id || !other.ready() {
+			continue
+		}
+		if _, err := c.GetObject(other.Id, id); err == nil {
+			return other, id
+		}
+	}
+	return sp, id
+}
+
+// listSpaces is the space named by --space or, without one, the private
+// space and every collab space set up here: a listing spans everything
+// and its rows name the space.
+func listSpaces(st *State, sp *Space, flag string) []*Space {
+	if flag != "" {
+		return []*Space{sp}
+	}
+	out := []*Space{sp}
+	for _, cs := range st.collabs() {
+		if cs.ready() {
+			out = append(out, spaceOf(st, cs.Id))
+		}
+	}
+	return out
+}
+
+// spaceLabel is the row suffix naming the space when a listing spans
+// several.
+func spaceLabel(sp *Space, on bool) string {
+	if !on {
+		return ""
+	}
+	return "  (" + sp.Name + ")"
 }
 
 // addRelation appends target to a relation property (read-modify-write).
@@ -451,7 +493,7 @@ func machineByHost(c *Client, sp *Space, host string) string {
 	return id
 }
 
-func docList(c *Client, sp *Space, args []string) {
+func docList(c *Client, sp *Space, args []string, label bool) {
 	fs, _ := parseArgs("doc list", args, func(fs *flag.FlagSet) {
 		fs.String("kind", "", "filter by kind")
 		fs.String("project", "", "filter by project scope")
@@ -498,8 +540,8 @@ func docList(c *Client, sp *Space, args []string) {
 		for _, lid := range linksOf(r, sp.owner("doc"), sp.prop("doc", "linear")) {
 			facets += " " + issues[lid]
 		}
-		fmt.Printf("%s  %-7s %-16s %s%s\n", globalLink(sp.Id, r["id"].(string)),
-			choiceOf(r, sp.owner("doc"), sp.prop("doc", "kind")), pad(projects[pid], 16), nameOf(r), facets)
+		fmt.Printf("%s  %-7s %-16s %s%s%s\n", globalLink(sp.Id, r["id"].(string)),
+			choiceOf(r, sp.owner("doc"), sp.prop("doc", "kind")), pad(projects[pid], 16), nameOf(r), facets, spaceLabel(sp, label))
 	}
 }
 
@@ -584,12 +626,14 @@ func cmdTask(args []string) {
 	case "add":
 		docAdd(c, st, sp, args[1:], map[string]any{})
 	case "list":
-		taskList(c, st, sp, args[1:])
+		for _, s := range listSpaces(st, sp, space) {
+			taskList(c, st, s, args[1:], space == "")
+		}
 	case "show":
 		if len(args) < 2 {
 			fatal(fmt.Errorf("task show <id>"))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		showObject(c, sp, id, true)
 	case "start", "done", "cancel":
 		fs, pos := parseArgs("task "+args[0], args[1:], func(fs *flag.FlagSet) {
@@ -598,7 +642,7 @@ func cmdTask(args []string) {
 		if len(pos) < 1 {
 			fatal(fmt.Errorf("task %s <id>", args[0]))
 		}
-		sp, id := objectIn(st, sp, pos[0])
+		sp, id := objectIn(c, st, sp, pos[0])
 		status := map[string]string{"start": "in_progress", "done": "done", "cancel": "cancelled"}[args[0]]
 		if err := taskSetStatus(c, st, sp, id, status, fs.Lookup("s").Value.String()); err != nil {
 			fatal(err)
@@ -608,7 +652,7 @@ func cmdTask(args []string) {
 		if len(args) < 3 {
 			fatal(fmt.Errorf("task link <id> <objectId>"))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		targets, err := sameSpaceIds(sp, args[2])
 		if err != nil || len(targets) != 1 {
 			fatal(fmt.Errorf("task link <id> <objectId in the same space>: %v", err))
@@ -655,6 +699,9 @@ func taskSetStatus(c *Client, st *State, sp *Space, id, status, sessionFlag stri
 	return nil
 }
 
+// anyProject as the project id of pendingTasks counts every project.
+const anyProject = "*"
+
 // pendingTasks lists open tasks for a project id: untargeted or targeted
 // at this machine, unassigned or assigned to me.
 func pendingTasks(c *Client, st *State, sp *Space, projectId string) []map[string]any {
@@ -668,14 +715,14 @@ func pendingTasks(c *Client, st *State, sp *Space, projectId string) []map[strin
 		pid := firstLink(r, sp, "doc", "project")
 		tgt := firstLink(r, sp, "task", "target")
 		who := firstMember(r, sp.owner("task"), sp.prop("task", "assignee"))
-		if (pid == "" || pid == projectId) && (tgt == "" || tgt == sp.MachineObjectId) && (who == "" || who == st.me()) {
+		if (projectId == anyProject || pid == "" || pid == projectId) && (tgt == "" || tgt == sp.MachineObjectId) && (who == "" || who == st.me()) {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-func taskList(c *Client, st *State, sp *Space, args []string) {
+func taskList(c *Client, st *State, sp *Space, args []string, label bool) {
 	fs, _ := parseArgs("task list", args, func(fs *flag.FlagSet) {
 		fs.Bool("all", false, "include done and cancelled")
 		fs.Bool("mine", false, "only tasks assigned to me or unassigned")
@@ -724,8 +771,8 @@ func taskList(c *Client, st *State, sp *Space, args []string) {
 		if proj == "" {
 			proj = "(any project)"
 		}
-		fmt.Printf("%s  %-11s %-6s %-16s %s%s\n", globalLink(sp.Id, r["id"].(string)), status,
-			choiceOf(r, sp.owner("task"), sp.prop("task", "priority")), pad(proj, 16), nameOf(r), facets)
+		fmt.Printf("%s  %-11s %-6s %-16s %s%s%s\n", globalLink(sp.Id, r["id"].(string)), status,
+			choiceOf(r, sp.owner("task"), sp.prop("task", "priority")), pad(proj, 16), nameOf(r), facets, spaceLabel(sp, label))
 	}
 }
 
@@ -762,13 +809,13 @@ func cmdPlan(args []string) {
 		if len(args) < 2 {
 			fatal(fmt.Errorf("plan show <id>"))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		showObject(c, sp, id, false)
 	case "approve", "done":
 		if len(args) < 2 {
 			fatal(fmt.Errorf("plan %s <id>", args[0]))
 		}
-		sp, id := objectIn(st, sp, args[1])
+		sp, id := objectIn(c, st, sp, args[1])
 		pp := map[string]any{"status": []string{map[string]string{"approve": "approved", "done": "done"}[args[0]]}}
 		if args[0] == "approve" {
 			pp["approvedAt"] = dateVal(time.Now())
@@ -805,7 +852,7 @@ func planAdd(c *Client, st *State, sp *Space, args []string) {
 	var target string
 	src := pos[len(pos)-1]
 	if len(pos) >= 2 {
-		sp, target = objectIn(st, sp, pos[0])
+		sp, target = objectIn(c, st, sp, pos[0])
 	}
 	data, err := readSource(src)
 	if err != nil {

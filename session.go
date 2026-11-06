@@ -81,8 +81,15 @@ func sessionStart(c *Client, st *State, tool Tool, sessionId, cwd, source string
 	// about them on every start. They stay one `any-agents task list` away
 	// and on the status page.
 	var b strings.Builder
-	n := len(pendingTasks(c, st, sp, projectId))
-	fmt.Fprintf(&b, "any-agents: shared context is on (space %s, project %q, session object %s, %d open task(s) — only act on them when asked).\n", sp.Name, scope, globalLink(sp.Id, objectId), n)
+	tasks := fmt.Sprintf("%d open task(s)", len(pendingTasks(c, st, sp, projectId)))
+	for _, cs := range st.collabs() {
+		if cs.ready() && cs.has("task") {
+			if m := len(pendingTasks(c, st, cs, anyProject)); m > 0 {
+				tasks += fmt.Sprintf(", %d in %s", m, cs.Name)
+			}
+		}
+	}
+	fmt.Fprintf(&b, "any-agents: shared context is on (space %s, project %q, session object %s, %s — only act on them when asked).\n", sp.Name, scope, globalLink(sp.Id, objectId), tasks)
 	b.WriteString("Use it: `any-agents search \"<topic>\"` recalls memories, docs and past sessions; " +
 		"`any-agents session note -` appends findings to this session's page; " +
 		"`any-agents session update --summary \"…\" [--linear KEY]` sets the session summary and the issues it worked on; " +

@@ -1384,9 +1384,8 @@ func testCollabSpace(t *testing.T) {
 	out, _ = runCLI(t, runOpts{sid: sidA}, "doc", "list", "--space", teamName)
 	mustContain(t, out, "E2E Shared Doc", "doc list --space")
 	out, _ = runCLI(t, runOpts{sid: sidA}, "doc", "list")
-	if strings.Contains(out, "E2E Shared Doc") {
-		t.Errorf("the private `doc list` shows the collab space's doc:\n%s", out)
-	}
+	mustContain(t, out, "E2E Shared Doc", "doc list without --space spans the collab space")
+	mustContain(t, out, "("+teamName+")", "doc list names the collab space")
 
 	// a shared task, assigned by member name when the profile has one
 	assignee := identity
@@ -1408,6 +1407,11 @@ func testCollabSpace(t *testing.T) {
 	}
 	out, _ = runCLI(t, runOpts{sid: sidA}, "task", "list", "--space", teamName, "--mine")
 	mustContain(t, out, "E2E Shared Task", "task list --space --mine")
+	out, _ = runCLI(t, runOpts{sid: sidA}, "task", "list")
+	mustContain(t, out, "E2E Shared Task", "task list without --space spans the collab space")
+	mustContain(t, out, "("+teamName+")", "task list names the collab space")
+	out, _ = runCLI(t, runOpts{sid: sidA}, "task", "show", sharedTask)
+	mustContain(t, out, "E2E Shared Task", "task show <bare id> finds the collab space's task")
 	runCLI(t, runOpts{sid: sidA}, "task", "start", taskLink)
 	row = apiObject(t, sharedTask, teamId)
 	mustEqual(t, choiceOf(row, tk, ts.prop("task", "status")), "in_progress", "shared task status after start")

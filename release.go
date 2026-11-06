@@ -62,7 +62,7 @@ func cmdRelease(args []string) {
 		if len(pos) < 1 {
 			fatal(fmt.Errorf("release show <id>"))
 		}
-		sp, id := objectIn(st, spaceOf(st, fs.Lookup("space").Value.String()), pos[0])
+		sp, id := objectIn(c, st, spaceOf(st, fs.Lookup("space").Value.String()), pos[0])
 		releaseShow(c, sp, id)
 	default:
 		fatal(fmt.Errorf("unknown release command %q", args[0]))

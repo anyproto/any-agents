@@ -206,8 +206,10 @@ any-agents stats [project] [--global] [--days N] | feedback <text> [--kind K] [-
 
 Aliases: `save` = `doc add`, `prompt …` = `task …`, `scratch append|show`
 = `session note|show`. Ids accept an object id or an `any://` link; a
-link names its space. Listings print `any://o/<space>/<id>` links that
-open in any-ui.
+link names its space, a bare id is looked up in the private space first
+and then in every collab space. Listings print `any://o/<space>/<id>`
+links that open in any-ui; without `--space`, `doc list` and `task list`
+span every space set up here and each row ends with its space name.
 
 Env: `ANY_AGENTS_ADDR` (default: the running server recorded in
 `~/.any/*/server.addr`, else `127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
