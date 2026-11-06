@@ -2106,6 +2106,23 @@ func testSearch(t *testing.T) {
 			return strings.Contains(out, "any://o/"+teamId+"/")
 		})
 	}
+
+	// an object moved to any-ui's bin leaves search and the listings
+	out, _ = runCLI(t, runOpts{sid: sidA, stdin: "# E2E Binned Doc\n\nThe quixotic marmalade protocol.\n"}, "doc", "add", "-")
+	binned := linkId(t, out)
+	waitFor(t, 30*time.Second, "the binned doc to be indexed", func() bool {
+		out, _ = runCLI(t, runOpts{sid: sidA}, "search", "quixotic marmalade protocol")
+		return strings.Contains(out, "E2E Binned Doc")
+	})
+	apiPost(t, "/v1/spaces/"+spaceId+"/properties/"+binned+"/collections/bin", nil, nil)
+	waitFor(t, 30*time.Second, "the binned doc to leave the search results", func() bool {
+		out, _ = runCLI(t, runOpts{sid: sidA}, "search", "quixotic marmalade protocol")
+		return !strings.Contains(out, "E2E Binned Doc")
+	})
+	out, _ = runCLI(t, runOpts{sid: sidA}, "doc", "list")
+	if strings.Contains(out, "E2E Binned Doc") {
+		t.Errorf("doc list shows a binned doc:\n%s", out)
+	}
 }
 
 type searchHit struct {

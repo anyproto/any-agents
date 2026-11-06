@@ -534,9 +534,12 @@ type SearchResult struct {
 	VectorStatus string      `json:"vectorStatus"`
 }
 
+// Search runs the space's hybrid search. Objects in any-ui's bin are
+// left out, as every listing leaves them out.
 func (c *Client) Search(space, query string, limit int) (*SearchResult, error) {
 	var out SearchResult
-	body := map[string]any{"query": query, "limit": limit, "maxData": 700}
+	body := map[string]any{"query": query, "limit": limit, "maxData": 700,
+		"filter": map[string]any{"any.collections": map[string]any{"$nin": []string{"bin"}}}}
 	return &out, c.do("POST", "/v1/spaces/"+seg(space)+"/search", body, &out)
 }
 
