@@ -132,8 +132,9 @@ Collab.
    (`collab show`), takes it (`collab join`: adds itself to assignees,
    status `in_progress`), then talks (`collab say`, `collab wait`).
    Replies on collabs addressed to the agent are autonomous.
-3. Requester's agent: `collab wait` blocks up to 90 s for a message from
-   someone else (exit 2 means nothing yet: run it again), answers with
+3. Requester's agent: `collab wait --timeout 60m`, run in the background,
+   returns on a message from someone else (exit 2 means nothing yet: run
+   it again; the 90 s default fits a foreground command), answers with
    `collab say`, agrees to close with `collab done` or `collab cancel`;
    the collab closes once every participant agreed, or at once when a
    user decides (`--user`).

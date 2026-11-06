@@ -81,7 +81,7 @@ func cmdCollab(args []string) {
 	case "join", "done", "cancel", "reopen", "say", "wait":
 		fs, pos := parseArgs("collab "+args[0], args[1:], func(fs *flag.FlagSet) {
 			spaceFlag(fs)
-			fs.Duration("timeout", 90*time.Second, "how long wait blocks for a reply (exit 2 on timeout: run it again to keep waiting)")
+			fs.Duration("timeout", 90*time.Second, "how long wait blocks for a reply; the default fits a foreground command, use 60m in a background one (exit 2 on timeout: run it again)")
 			fs.Bool("all", false, "wait: return on any message, own ones included")
 			fs.String("met", "", "done: how the definition of done was met; cancel/reopen: the reason (posted to the chat)")
 			fs.String("user", "", "done/cancel: close at once on the user's decision, quoting them; nobody else's agreement is needed")
@@ -160,7 +160,7 @@ func cmdCollab(args []string) {
 			if err := collabSay(c, st, sp, id, text); err != nil {
 				fatal(err)
 			}
-			fmt.Fprintf(os.Stderr, "any-agents: posted; now `any-agents collab wait %s` for the reply (exit 2 = none yet, run it again) until the collab closes; once your part is done, `collab done <link> --met \"<evidence>\"` records your agreement\n", globalLink(sp.Id, id))
+			fmt.Fprintf(os.Stderr, "any-agents: posted; now wait for the reply with `any-agents collab wait %s --timeout 60m` in the background (a foreground command is cut at the harness's limit; exit 2 = none yet, run it again) until the collab closes; once your part is done, `collab done <link> --met \"<evidence>\"` records your agreement\n", globalLink(sp.Id, id))
 		case "wait":
 			timeout, _ := time.ParseDuration(fs.Lookup("timeout").Value.String())
 			msgs, closedAs, err := collabWait(c, st, sp, id, timeout, fs.Lookup("all").Value.String() == "true")
@@ -490,7 +490,7 @@ func collabClose(c *Client, st *State, sp *Space, id, verb, met, user string) er
 		return err
 	}
 	_ = renderStatusPage(c, sp)
-	fmt.Printf("%s  agreed; closes once %s agreed too — keep `collab wait` running\n", link, strings.Join(memberNames(memberIndex(c, sp), waiting), ", "))
+	fmt.Printf("%s  agreed; closes once %s agreed too — keep `collab wait <link> --timeout 60m` running in the background\n", link, strings.Join(memberNames(memberIndex(c, sp), waiting), ", "))
 	return nil
 }
 
@@ -655,7 +655,7 @@ func collabDigest(c *Client, st *State) string {
 			fmt.Fprintf(&b, "Collab space %s has %d open help request(s) nobody took: %s — `any-agents collab show <link>` reads one, `collab join` takes it.\n", sp.Name, len(requests), strings.Join(requests, "; "))
 		}
 		if len(fresh) > 0 {
-			fmt.Fprintf(&b, "New messages on your collabs in %s: %s — `any-agents collab wait <link>` reads them.\n", sp.Name, strings.Join(fresh, "; "))
+			fmt.Fprintf(&b, "New messages on your collabs in %s: %s — `any-agents collab wait <link>` reads them; then keep `collab wait <link> --timeout 60m` running in the background.\n", sp.Name, strings.Join(fresh, "; "))
 		}
 	}
 	return b.String()

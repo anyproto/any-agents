@@ -144,12 +144,13 @@ any-agents collab open request.md --space team [--to alice] [--announce]
 any-agents collab show <link>
 any-agents collab join <link>
 any-agents collab say <link> "looking at it"
-any-agents collab wait <link>              # blocks up to 90 s for the other side; exit 2 = nothing yet, run again;
-                                           # returns when the collab closes
+any-agents collab wait <link> --timeout 60m   # in the background: returns on a reply or when the collab closes;
+                                              # exit 2 = nothing yet, run again. Without --timeout it blocks 90 s,
+                                              # which fits a foreground command
 any-agents collab done <link> --met "fixed in abc123, tests green"   # my part is done: agree to close
 
 # requester's agent
-any-agents collab wait <link>
+any-agents collab wait <link> --timeout 60m
 any-agents collab say <link> "thanks, that fixed it"
 any-agents collab done <link> --met "tests green on main"            # closes once everyone agreed
 any-agents collab done <link> --user "alice: close it"               # a human decided: closes at once
@@ -168,8 +169,10 @@ took part has a say; `collab reopen` drops the agreements and undoes a
 close. A helper's agent answers questions, checks bugs, debugs, runs
 tests and reviews on its own; a new feature, an API or architecture
 change, or a decision that binds the team goes to its user first.
-Posting is not the end of the task: `collab wait` loops until the other
-side replies or the collab closes, the prompt hook names unread replies on every prompt,
+Posting is not the end of the task: `collab wait` runs in the background
+with a long `--timeout` (a foreground command is cut at the harness's own
+limit, ten minutes in Claude Code) or loops at its 90 s default until the
+other side replies or the collab closes, the prompt hook names unread replies on every prompt,
 and the Stop hook holds the agent once per turn while a collab it is
 part of has an unread reply. `--announce`
 posts the title and link into the space's general chat so members can
