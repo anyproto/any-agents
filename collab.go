@@ -26,16 +26,22 @@ func resolveCollab(c *Client, st *State, ref, spaceFlag string) (*Space, string,
 	id := parseObjectId(ref)
 	if spaceId := parseSpaceId(ref); spaceId != "" && spaceId != ref {
 		if sp := st.space(spaceId); sp != nil {
+			catchUp(st, sp)
 			return sp, id, nil
 		}
 		return nil, "", fmt.Errorf("space %s of %s is not set up here", spaceId, ref)
 	}
 	if spaceFlag != "" {
 		sp, err := st.pick(spaceFlag)
-		return sp, id, err
+		if err != nil {
+			return nil, "", err
+		}
+		catchUp(st, sp)
+		return sp, id, nil
 	}
 	for _, sp := range st.collabs() {
 		if _, err := c.GetObject(sp.Id, id); err == nil {
+			catchUp(st, sp)
 			return sp, id, nil
 		}
 	}
@@ -76,6 +82,7 @@ func cmdCollab(args []string) {
 		if !sp.has("collab") {
 			fatal(fmt.Errorf("collabs are off in %s on this machine — run `any-agents install` (after updating the any server if it predates chat on user types)", sp.Name))
 		}
+		warnHeldElsewhere(id)
 		markEngaged(id)
 		collabShow(c, st, sp, id, atoi(fs.Lookup("n").Value.String()))
 	case "join", "done", "cancel", "reopen", "say", "wait":
@@ -96,6 +103,7 @@ func cmdCollab(args []string) {
 		if !sp.has("collab") {
 			fatal(fmt.Errorf("collabs are off in %s on this machine — run `any-agents install` (after updating the any server if it predates chat on user types)", sp.Name))
 		}
+		warnHeldElsewhere(id)
 		markEngaged(id)
 		switch args[0] {
 		case "join":
@@ -248,7 +256,7 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 		cp["linear"] = links
 	}
 	if v := get("related"); v != "" {
-		ids, err := sameSpaceIds(sp, v)
+		ids, err := sameSpaceIds(c, sp, v)
 		if err != nil {
 			fatal(err)
 		}
@@ -343,6 +351,9 @@ func collabList(c *Client, st *State, args []string) {
 			if agreed := membersOf(r, t, sp.prop("collab", "agreed")); len(agreed) > 0 && contains(collabOpen, choiceOf(r, t, sp.prop("collab", "status"))) {
 				fmt.Printf("  closing, waiting for %s", strings.Join(memberNames(members, collabWaiting(sp, r, agreed)), ", "))
 			}
+			if heldElsewhere(id, currentSessionId()) {
+				fmt.Printf("  (another session of yours)")
+			}
 			fmt.Printf("  (%s)\n", sp.Name)
 		}
 	}
@@ -391,7 +402,7 @@ func collabShow(c *Client, st *State, sp *Space, id string, n int) {
 	}
 	printMessages(msgs, members)
 	if len(msgs) > 0 {
-		saveCursor(id, verOf(msgs[len(msgs)-1]))
+		saveCursor(id, lastVer(msgs))
 	}
 }
 
@@ -414,7 +425,7 @@ func collabJoin(c *Client, st *State, sp *Space, id string) error {
 	// only what follows. A repeated join keeps the cursor.
 	if !contains(cur, st.me()) {
 		if msgs, err := chatTail(c, sp, id, 1); err == nil && len(msgs) > 0 {
-			saveCursor(id, verOf(msgs[0]))
+			saveCursor(id, maxVerOf(msgs[0]))
 		}
 	}
 	fmt.Printf("%s  joined\n", globalLink(sp.Id, id))
@@ -464,6 +475,9 @@ func collabClose(c *Client, st *State, sp *Space, id, verb, met, user string) er
 			return fmt.Errorf("collab done needs --met \"<how the definition of done was met>\"%s — or --user \"<their words>\" when your user decided to close it", hint)
 		}
 		return fmt.Errorf("collab cancel needs --met \"<why>\" — or --user \"<their words>\" when your user decided to close it")
+	}
+	if sp.prop("collab", "agreed") == "" {
+		return fmt.Errorf("this machine's setup of %s predates collab votes: run `any-agents install`, then vote again", sp.Name)
 	}
 	parties := collabParties(sp, row)
 	if !contains(parties, st.me()) {
@@ -563,13 +577,15 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		// wait starts from now. A collab opened here has an empty cursor
 		// and every reply counts.
 		if msgs, err := chatTail(c, sp, id, 1); err == nil && len(msgs) > 0 {
-			saveCursor(id, verOf(msgs[0]))
+			saveCursor(id, maxVerOf(msgs[0]))
 		} else {
 			saveCursor(id, "")
 		}
 	}
+	// The cursor is read once: a sibling waiter of the same member that
+	// advances the shared cursor must not hide the message from this one.
+	cursor, _ := loadCursor(id)
 	for {
-		cursor, _ := loadCursor(id)
 		msgs, err := chatSince(c, sp, id, cursor, 50)
 		if err != nil {
 			return nil, "", err
@@ -581,7 +597,10 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 			}
 		}
 		if len(msgs) > 0 {
-			saveCursor(id, verOf(msgs[len(msgs)-1]))
+			cursor = lastVer(msgs)
+			if saved, _ := loadCursor(id); cursor > saved {
+				saveCursor(id, cursor)
+			}
 		}
 		if len(out) > 0 {
 			return out, "", nil
@@ -598,7 +617,7 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 
 // collabDigest is the session-start note on collab spaces: open requests
 // others filed, and my collabs with messages I have not seen.
-func collabDigest(c *Client, st *State) string {
+func collabDigest(c *Client, st *State, sessionId string) string {
 	var b strings.Builder
 	for _, sp := range st.collabs() {
 		if err := ensureSpaceSetup(c, sp); err != nil {
@@ -614,12 +633,18 @@ func collabDigest(c *Client, st *State) string {
 			continue
 		}
 		t := sp.owner("collab")
-		var requests, forMe, fresh, replies []string
+		var requests, forMe, fresh, replies, held []string
 		for _, r := range rows {
 			id, _ := r["id"].(string)
 			requester := firstMember(r, t, sp.prop("collab", "requester"))
 			assignees := membersOf(r, t, sp.prop("collab", "assignees"))
 			mine := requester == st.me() || contains(assignees, st.me())
+			if heldElsewhere(id, sessionId) {
+				if len(held) < 5 {
+					held = append(held, fmt.Sprintf("%q %s", nameOf(r), globalLink(sp.Id, id)))
+				}
+				continue
+			}
 			status := choiceOf(r, t, sp.prop("collab", "status"))
 			if status == "request" && requester != st.me() && contains(assignees, st.me()) && len(forMe) < 5 {
 				item := fmt.Sprintf("%q %s", nameOf(r), globalLink(sp.Id, id))
@@ -653,6 +678,9 @@ func collabDigest(c *Client, st *State) string {
 		}
 		if len(requests) > 0 {
 			fmt.Fprintf(&b, "Collab space %s has %d open help request(s) nobody took: %s — `any-agents collab show <link>` reads one, `collab join` takes it.\n", sp.Name, len(requests), strings.Join(requests, "; "))
+		}
+		if len(held) > 0 {
+			fmt.Fprintf(&b, "Collab(s) in %s another session of yours already handles: %s — leave them to it; if that session is gone, `any-agents collab show <link>` takes one over.\n", sp.Name, strings.Join(held, "; "))
 		}
 		if len(fresh) > 0 {
 			fmt.Fprintf(&b, "New messages on your collabs in %s: %s — `any-agents collab wait <link>` reads them; then keep `collab wait <link> --timeout 60m` running in the background.\n", sp.Name, strings.Join(fresh, "; "))
@@ -695,7 +723,11 @@ func ownAgentMessage(m map[string]any, st *State) bool {
 func chatSince(c *Client, sp *Space, objectId, cursor string, limit int) ([]map[string]any, error) {
 	var filter map[string]any
 	if cursor != "" {
-		filter = map[string]any{"_ver.id": map[string]any{"$gt": cursor}}
+		// _ver.id is the creation version; an edit moves _ver.text only.
+		filter = map[string]any{"$or": []any{
+			map[string]any{"_ver.id": map[string]any{"$gt": cursor}},
+			map[string]any{"_ver.text": map[string]any{"$gt": cursor}},
+		}}
 	}
 	return c.QueryRecords(sp.Id, objectId, "chat_messages", filter, []string{"_ver.id"}, limit)
 }
@@ -736,6 +768,9 @@ func printMessages(msgs []map[string]any, members map[string]string) {
 		}
 		text, _ := m["text"].(string)
 		at := time.Unix(int64(recordFloat(m, "createdAt")), 0).Format("01-02 15:04")
+		if maxVerOf(m) != verOf(m) {
+			at += ", edited"
+		}
 		fmt.Printf("[%s] %s: %s\n", at, who, strings.TrimSpace(text))
 	}
 }
@@ -919,4 +954,56 @@ func doneWhenOf(body string) string {
 		lines = append(lines, strings.TrimLeft(l, "-* "))
 	}
 	return trunc(strings.Join(lines, " "), 600)
+}
+
+// maxVerOf is the newest version of a message: its creation version or,
+// after an edit, the version of its text.
+func maxVerOf(m map[string]any) string {
+	v := verOf(m)
+	if ver, ok := m["_ver"].(map[string]any); ok {
+		if t, _ := ver["text"].(string); t > v {
+			v = t
+		}
+	}
+	return v
+}
+
+// lastVer is the newest version among messages, the cursor to save.
+func lastVer(msgs []map[string]any) string {
+	last := ""
+	for _, m := range msgs {
+		if v := maxVerOf(m); v > last {
+			last = v
+		}
+	}
+	return last
+}
+
+func currentSessionId() string { return os.Getenv(currentTool().SessionEnv()) }
+
+// engagedSessions lists the harness sessions of this member that took
+// part in a collab.
+func engagedSessions(objectId string) []string {
+	b, err := os.ReadFile(engagedPath(objectId))
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(b))
+}
+
+// heldElsewhere reports whether another session of this member took part
+// in the collab and this one did not: a collab belongs to the session
+// that joined or answered it.
+func heldElsewhere(objectId, sid string) bool {
+	if sid == "" {
+		return false
+	}
+	others := engagedSessions(objectId)
+	return len(others) > 0 && !contains(others, sid)
+}
+
+func warnHeldElsewhere(objectId string) {
+	if heldElsewhere(objectId, currentSessionId()) {
+		fmt.Fprintln(os.Stderr, "any-agents: another session of yours already took part in this collab; carry on only if that session is gone")
+	}
 }

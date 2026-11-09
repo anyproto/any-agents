@@ -53,7 +53,7 @@ func hookSessionStart(tool Tool) {
 		recordErrorStat("session start", err)
 		return
 	}
-	ctx += collabDigest(c, st) + releaseDigest(c, st, in.Cwd)
+	ctx += collabDigest(c, st, in.SessionId) + releaseDigest(c, st, in.Cwd)
 	tool.EmitContext("SessionStart", ctx)
 	if err := renderStatusPage(c, sp); err != nil {
 		fmt.Fprintf(os.Stderr, "any-agents: status page: %v\n", err)

@@ -205,6 +205,7 @@ func TestE2E(t *testing.T) {
 	t.Run("doc_add_list_append_edit_archive", testDocs)
 	t.Run("task_add_start_done_and_pending_count", testTasks)
 	t.Run("task_assignee_and_mine", testTaskAssignee)
+	t.Run("task_update_and_link_checks", testTaskUpdate)
 	t.Run("plan_collection_on_a_task_and_standalone", testPlans)
 	t.Run("session_note_summary_end_and_transcript", testSessionLifecycle)
 	t.Run("codex_joins_the_existing_install", testCodexInstall)
@@ -1682,6 +1683,59 @@ func testCollabMember(t *testing.T) {
 	mustContain(t, promptHook(t, sidA, "what should I look at next in this repository today"), "unread replies", "prompt hook names the unread reply")
 	runCLI(t, runOpts{sid: sidA}, "collab", "show", memberCollab)
 	mustEqual(t, stopHook(t, sidA, false), "", "stop hook after the reply was read")
+
+	// two waiters of the same member both return on a new message
+	type waitRes struct {
+		out string
+		err error
+	}
+	ch := make(chan waitRes, 2)
+	for _, sid := range []string{sidA, "e2e-sibling-session"} {
+		go func(sid string) {
+			out, _, err := execCLI(runOpts{sid: sid}, "collab", "wait", memberCollab, "--timeout", "60s")
+			ch <- waitRes{out, err}
+		}(sid)
+	}
+	time.Sleep(3 * time.Second)
+	runCLI(t, runOpts{member: true}, "collab", "say", memberCollab, "second ping for two waiters")
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-ch:
+			if r.err != nil || !strings.Contains(r.out, "second ping for two waiters") {
+				t.Errorf("waiter %d: err=%v out=%q", i, r.err, r.out)
+			}
+		case <-time.After(70 * time.Second):
+			t.Fatal("a waiter did not return on the member's message")
+		}
+	}
+	// an edited message wakes a waiter and is marked
+	var editId string
+	for _, m := range apiRecordsAt(t, addrB, teamId, memberCollabId, "chat_messages", nil) {
+		if txt, _ := m["text"].(string); txt == "second ping for two waiters" {
+			editId, _ = m["id"].(string)
+		}
+	}
+	if editId == "" {
+		t.Fatal("the member's message is missing on the member's server")
+	}
+	edited := make(chan waitRes, 1)
+	go func() {
+		out, _, err := execCLI(runOpts{sid: sidA}, "collab", "wait", memberCollab, "--timeout", "60s")
+		edited <- waitRes{out, err}
+	}()
+	time.Sleep(3 * time.Second)
+	apiDoAt(t, addrB, "PATCH", "/v1/spaces/"+teamId+"/objects/"+memberCollabId+"/chat/messages/"+editId, map[string]any{"text": "second ping, edited"}, nil)
+	select {
+	case r := <-edited:
+		if r.err != nil || !strings.Contains(r.out, "second ping, edited") || !strings.Contains(r.out, ", edited]") {
+			t.Errorf("wait after an edit: err=%v out=%q", r.err, r.out)
+		}
+	case <-time.After(70 * time.Second):
+		t.Fatal("collab wait did not wake on an edited message")
+	}
+	// another session of the same member sees who holds the collab
+	out, _ = runCLI(t, runOpts{sid: "e2e-other-session"}, "collab", "list", "--space", teamName)
+	mustContain(t, out, "(another session of yours)", "collab list marks a sibling session's collab")
 
 	// the requester's agreement completes the close
 	waitFor(t, 60*time.Second, "the owner's agreement to sync to the member", func() bool {
@@ -3184,4 +3238,37 @@ func stopHook(t *testing.T, sessionId string, active bool) string {
 	}
 	mustEqual(t, h.Decision, "block", "stop hook decision")
 	return h.Reason
+}
+
+// --- 5c. task update and link checks ---
+
+func testTaskUpdate(t *testing.T) {
+	ps := loadStateT(t, homeA).priv()
+	tk, d := ps.owner("task"), ps.owner("doc")
+	out, _ := runCLI(t, runOpts{sid: sidA, stdin: "# E2E Task Update\n\nChange me.\n"}, "task", "add", "-")
+	id := linkId(t, out)
+	_, errOut := runCLI(t, runOpts{sid: sidA, wantFail: true}, "task", "update", id)
+	mustContain(t, errOut, "nothing to change", "task update without flags")
+	runCLI(t, runOpts{sid: sidA}, "task", "update", id, "--priority", "high", "--assignee", identity, "--title", "E2E Task Updated")
+	row := apiObject(t, id)
+	mustEqual(t, nameOf(row), "E2E Task Updated", "task update --title")
+	mustEqual(t, choiceOf(row, tk, ps.prop("task", "priority")), "high", "task update --priority")
+	mustEqualSlice(t, arrOf(row, tk, ps.prop("task", "assignee")), []string{"any://u/" + identity}, "task update --assignee")
+	runCLI(t, runOpts{sid: sidA}, "task", "update", id, "--assignee", "-")
+	if a := arrOf(apiObject(t, id), tk, ps.prop("task", "assignee")); len(a) != 0 {
+		t.Errorf("task update --assignee - kept %v", a)
+	}
+	_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "task", "update", id, "--priority", "urgent")
+	mustContain(t, errOut, "low, normal or high", "task update with a bad priority")
+
+	// link takes objects of the space only
+	_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "task", "link", id, "DROID-388")
+	mustContain(t, errOut, "--linear", "task link with an issue key")
+	_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "task", "link", id, "not-an-object")
+	mustContain(t, errOut, "not an object", "task link with a bare word")
+	if n := len(arrOf(apiObject(t, id), d, ps.prop("doc", "related"))); n != 0 {
+		t.Errorf("task link stored %d target(s) from invalid refs", n)
+	}
+	runCLI(t, runOpts{sid: sidA}, "task", "link", id, taskObj)
+	mustEqualSlice(t, arrOf(apiObject(t, id), d, ps.prop("doc", "related")), []string{"any://" + taskObj}, "task link to an object")
 }

@@ -193,6 +193,7 @@ any-agents doc  list [--kind K] [--project P] [--all] [--space S] | show <id> | 
 any-agents doc  archive <id> | link <id> <objectId>
 any-agents task add <file|->  [--title T] [--project P] [--priority low|normal|high] [--assignee M] [--target HOST] [--space S]
 any-agents task list [--all] [--mine] [--project P] [--space S] | show <id> | start <id> | done <id> | cancel <id> | link <id> <objectId>
+any-agents task update <id> [--title T] [--priority low|normal|high] [--assignee M|-] [--linear KEYS]
 any-agents plan add [<taskId>] <file|-> [--status draft|approved] [--replace] | list [--all] | show <id> | approve <id> | done <id>
 any-agents session note <text|file|-> | show | update [--summary S] [--title T] [--linear KEYS] | list [--project P] [--space S] | transcript [-o FILE]
 any-agents session share --space S [--transcript]

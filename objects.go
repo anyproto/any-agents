@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -231,7 +232,7 @@ func cmdDoc(args []string) {
 			fatal(fmt.Errorf("doc link <id> <objectId>"))
 		}
 		sp, id := objectIn(c, st, sp, args[1])
-		targets, err := sameSpaceIds(sp, args[2])
+		targets, err := sameSpaceIds(c, sp, args[2])
 		if err != nil || len(targets) != 1 {
 			fatal(fmt.Errorf("doc link <id> <objectId in the same space>: %v", err))
 		}
@@ -264,9 +265,13 @@ func extractSpace(args []string) (string, []string) {
 	return space, rest
 }
 
-// sameSpaceIds parses comma-separated ids or links that must live in sp:
-// relations never cross spaces.
-func sameSpaceIds(sp *Space, csv string) ([]string, error) {
+// issueKey looks like a Linear key (ABC-123).
+var issueKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*-\d+$`)
+
+// sameSpaceIds parses comma-separated ids or links of objects that exist
+// in sp: relations never cross spaces, and a relation target that is not
+// an object would be stored as a dead link.
+func sameSpaceIds(c *Client, sp *Space, csv string) ([]string, error) {
 	var ids []string
 	for _, ref := range strings.Split(csv, ",") {
 		ref = strings.TrimSpace(ref)
@@ -276,7 +281,14 @@ func sameSpaceIds(sp *Space, csv string) ([]string, error) {
 		if spaceId := parseSpaceId(ref); spaceId != ref && spaceId != sp.Id {
 			return nil, fmt.Errorf("%s is in another space; a relation cannot cross spaces (put the link in the body instead)", ref)
 		}
-		ids = append(ids, parseObjectId(ref))
+		id := parseObjectId(ref)
+		if issueKey.MatchString(id) {
+			return nil, fmt.Errorf("%s is an issue key, not an object: use --linear %s", ref, strings.ToUpper(id))
+		}
+		if _, err := c.GetObject(sp.Id, id); err != nil {
+			return nil, fmt.Errorf("%s is not an object in %s", ref, sp.Name)
+		}
+		ids = append(ids, id)
 	}
 	return ids, nil
 }
@@ -354,8 +366,8 @@ func docAdd(c *Client, st *State, sp *Space, args []string, taskProps map[string
 		fs.String("linear", "", "Linear issue keys, comma-separated (ABC-123)")
 		fs.String("related", "", "comma-separated object ids or any:// links to relate")
 		fs.String("pr", "", "GitHub pull request URL (default: the first PR link in the body)")
-		fs.String("priority", "normal", "task priority: low | normal | high (task add only)")
-		fs.String("assignee", "", "task assignee: a member name or identity (task add only)")
+		fs.String("priority", "normal", "task priority: low | normal | high (task add; `task update` changes it)")
+		fs.String("assignee", "", "task assignee: a member name or identity (task add; `task update` changes it)")
 		fs.String("target", "", "task target machine hostname (task add only)")
 		fs.Bool("new", false, "always create, even when a doc with this title exists")
 		fs.String("s", "", "session id (default: the tool's session env var)")
@@ -405,7 +417,7 @@ func docAdd(c *Client, st *State, sp *Space, args []string, taskProps map[string
 		noteSessionLinear(c, st, ci.sessionId, links, sp)
 	}
 	if v := get("related"); v != "" {
-		ids, err := sameSpaceIds(sp, v)
+		ids, err := sameSpaceIds(c, sp, v)
 		if err != nil {
 			fatal(err)
 		}
@@ -616,7 +628,7 @@ func showObject(c *Client, sp *Space, id string, withLinked bool) {
 
 func cmdTask(args []string) {
 	if len(args) == 0 {
-		fatal(fmt.Errorf("usage: task add|list|show|start|done|cancel|link"))
+		fatal(fmt.Errorf("usage: task add|list|show|update|start|done|cancel|link"))
 	}
 	c := NewClient()
 	st := mustSetup(c)
@@ -648,12 +660,27 @@ func cmdTask(args []string) {
 			fatal(err)
 		}
 		fmt.Printf("%s  %s\n", globalLink(sp.Id, id), status)
+	case "update":
+		fs, pos := parseArgs("task update", args[1:], func(fs *flag.FlagSet) {
+			fs.String("title", "", "new name")
+			fs.String("priority", "", "low | normal | high")
+			fs.String("assignee", "", "member name or identity; \"-\" clears it")
+			fs.String("linear", "", "Linear issue keys to link, comma-separated")
+		})
+		if len(pos) < 1 {
+			fatal(fmt.Errorf("task update <id> [--title T] [--priority P] [--assignee M] [--linear KEYS]"))
+		}
+		sp, id := objectIn(c, st, sp, pos[0])
+		if err := taskUpdate(c, sp, id, fs); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%s  updated\n", globalLink(sp.Id, id))
 	case "link":
 		if len(args) < 3 {
 			fatal(fmt.Errorf("task link <id> <objectId>"))
 		}
 		sp, id := objectIn(c, st, sp, args[1])
-		targets, err := sameSpaceIds(sp, args[2])
+		targets, err := sameSpaceIds(c, sp, args[2])
 		if err != nil || len(targets) != 1 {
 			fatal(fmt.Errorf("task link <id> <objectId in the same space>: %v", err))
 		}
@@ -701,6 +728,65 @@ func taskSetStatus(c *Client, st *State, sp *Space, id, status, sessionFlag stri
 
 // anyProject as the project id of pendingTasks counts every project.
 const anyProject = "*"
+
+// taskUpdate changes a task's name, priority, assignee or Linear links.
+func taskUpdate(c *Client, sp *Space, id string, fs *flag.FlagSet) error {
+	get := func(k string) string { return strings.TrimSpace(fs.Lookup(k).Value.String()) }
+	if get("title") == "" && get("priority") == "" && get("assignee") == "" && get("linear") == "" {
+		return fmt.Errorf("task update: nothing to change (--title, --priority, --assignee, --linear)")
+	}
+	row, err := c.GetObject(sp.Id, id)
+	if err != nil {
+		return err
+	}
+	if !sp.isA(row, "task") {
+		return fmt.Errorf("%s is not a task", globalLink(sp.Id, id))
+	}
+	if t := get("title"); t != "" {
+		if err := c.SetProperties(sp.Id, id, "any", map[string]any{"name": t}); err != nil {
+			return err
+		}
+	}
+	tp := map[string]any{}
+	if p := get("priority"); p != "" {
+		if !contains([]string{"low", "normal", "high"}, p) {
+			return fmt.Errorf("priority is low, normal or high")
+		}
+		tp["priority"] = []string{p}
+	}
+	if a := get("assignee"); a == "-" {
+		tp["assignee"] = nil
+	} else if a != "" {
+		links, err := resolveMembers(c, sp, a)
+		if err != nil {
+			return err
+		}
+		tp["assignee"] = links
+	}
+	if v := get("linear"); v != "" {
+		tp["linearKey"] = strings.ToUpper(v)
+		links, err := linearLinks(c, sp, v)
+		if err != nil {
+			return err
+		}
+		ids := linksOf(row, sp.owner("doc"), sp.prop("doc", "linear"))
+		for _, l := range links {
+			if lid := parseObjectId(l); !contains(ids, lid) {
+				ids = append(ids, lid)
+			}
+		}
+		if err := c.SetProperties(sp.Id, id, sp.owner("doc"), props(sp, "doc", map[string]any{"linear": linkList(ids)})); err != nil {
+			return err
+		}
+	}
+	if len(tp) > 0 {
+		if err := c.SetProperties(sp.Id, id, sp.owner("task"), props(sp, "task", tp)); err != nil {
+			return err
+		}
+	}
+	_ = renderStatusPage(c, sp)
+	return nil
+}
 
 // pendingTasks lists open tasks for a project id: untargeted or targeted
 // at this machine, unassigned or assigned to me.

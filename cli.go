@@ -93,13 +93,19 @@ func spaceOf(st *State, flag string) *Space {
 	if err != nil {
 		fatal(err)
 	}
-	// A collab space set up by an older binary catches up on first use.
+	catchUp(st, sp)
+	return sp
+}
+
+// catchUp re-ensures a collab space set up by an older binary on first
+// use, so a property added since (a vote, say) is known before it is
+// read or written.
+func catchUp(st *State, sp *Space) {
 	if sp.Kind == kindCollab && sp.SetupVersion != setupVersion {
 		if err := ensureSpaceSetup(NewClient(), sp); err != nil {
 			fmt.Fprintf(os.Stderr, "any-agents: %s: setup: %v\n", sp.Name, err)
 		}
 	}
-	return sp
 }
 
 // resolveSession picks the session id: flag → the tool's session env var
