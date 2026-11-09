@@ -633,6 +633,12 @@ func checkSpaceSetup(t *testing.T, sp *spaceState) {
 	if sp.collabOn() {
 		wantViews["collab"] = []struct{ id, name string }{{"default", "Open"}, {"all", "All"}}
 	}
+	if sp.Kind == "collab" {
+		wantViews["task"] = append(wantViews["task"], struct{ id, name string }{"mine", "For You"})
+		if sp.collabOn() {
+			wantViews["collab"] = append(wantViews["collab"], struct{ id, name string }{"mine", "For You"})
+		}
+	}
 	for name, want := range wantViews {
 		host := sp.dataview(name)
 		if host == "" {
@@ -660,8 +666,10 @@ func checkSpaceSetup(t *testing.T, sp *spaceState) {
 			t.Errorf("%s %s: want %d view(s) %v, got %v", sp.Name, name, len(want), want, keys(byViewId))
 		}
 		declared := map[string]bool{"name": true}
-		for _, id := range sp.bundle(name).Props {
-			declared[id] = true
+		for _, b := range sp.Bundles {
+			for _, id := range b.Props {
+				declared[id] = true
+			}
 		}
 		for _, w := range want {
 			v := byViewId[w.id]
@@ -682,6 +690,9 @@ func checkSpaceSetup(t *testing.T, sp *spaceState) {
 			}
 			// columns are bare property ids (any-ui's column ids)
 			ls, _ := v["layoutSettings"].(map[string]any)
+			if ls["clickToOpen"] != true || ls["openMode"] != "full-screen" {
+				t.Errorf("%s view %s: layoutSettings lacks clickToOpen/openMode: %v", name, w.id, ls)
+			}
 			for _, key := range []string{"visible", "order"} {
 				cols, _ := ls[key].([]any)
 				if len(cols) < 2 {
@@ -1346,6 +1357,40 @@ func testCollabSpace(t *testing.T) {
 		if !regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(want.id) + `\s+` + want.kind + `\s`).MatchString(out) {
 			t.Errorf("space list has no %s line for %s:\n%s", want.kind, want.id, out)
 		}
+	}
+
+	// a view edited in any-ui survives a re-ensure, a stock view is restored
+	dvHost := ts.dataview("collab")
+	if dvHost != "" {
+		bare := map[string]any{"visible": []string{"name"}, "order": []string{"name"}}
+		apiPost(t, "/v1/spaces/"+teamId+"/modify", map[string]any{"objectId": dvHost, "dataset": "views", "records": []map[string]any{
+			{"id": "all", "ops": []map[string]any{{"type": "$set", "path": "anyUi", "value": map[string]any{"version": 1}}, {"type": "$set", "path": "layoutSettings", "value": bare}}},
+			{"id": "default", "ops": []map[string]any{{"type": "$set", "path": "layoutSettings", "value": bare}}},
+		}}, nil)
+		lowerSetupVersion(t, homeA, teamId, dvHost)
+		runCLI(t, runOpts{sid: sidA}, "collab", "list", "--space", teamName)
+		for _, v := range apiRecordsIn(t, teamId, dvHost, "views", nil) {
+			ls, _ := v["layoutSettings"].(map[string]any)
+			vis, _ := ls["visible"].([]any)
+			switch v["id"] {
+			case "all":
+				if len(vis) != 1 {
+					t.Errorf("re-ensure overwrote a view edited in any-ui: %v", vis)
+				}
+			case "default":
+				if len(vis) < 2 {
+					t.Errorf("re-ensure left a stock view's columns at %v", vis)
+				}
+			}
+		}
+		if dvs := apiRecordsIn(t, teamId, dvHost, "dataviews", nil); len(dvs) != 1 || int(dvs[0]["setupVersion"].(float64)) != wantSetupVersion(t) {
+			t.Errorf("dataview setupVersion after re-ensure: %s", mustJSON(dvs))
+		}
+		// back to stock
+		apiPost(t, "/v1/spaces/"+teamId+"/modify", map[string]any{"objectId": dvHost, "dataset": "views", "records": []map[string]any{
+			{"id": "all", "ops": []map[string]any{{"type": "$unset", "path": "anyUi"}}}}}, nil)
+		lowerSetupVersion(t, homeA, teamId, dvHost)
+		runCLI(t, runOpts{sid: sidA}, "collab", "list", "--space", teamName)
 	}
 
 	// a doc filed in the collab space by name
@@ -3271,4 +3316,25 @@ func testTaskUpdate(t *testing.T) {
 	}
 	runCLI(t, runOpts{sid: sidA}, "task", "link", id, taskObj)
 	mustEqualSlice(t, arrOf(apiObject(t, id), d, ps.prop("doc", "related")), []string{"any://" + taskObj}, "task link to an object")
+}
+
+// lowerSetupVersion makes a space look set up by an older binary: the
+// state file's version and the dataview's record both drop to 1, so the
+// next command on the space re-ensures it.
+func lowerSetupVersion(t *testing.T, home, spaceId, dvHost string) {
+	t.Helper()
+	path := filepath.Join(home, ".any-agents", "state.json")
+	var st map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &st); err != nil {
+		t.Fatal(err)
+	}
+	spaces, _ := st["spaces"].(map[string]any)
+	sp, _ := spaces[spaceId].(map[string]any)
+	if sp == nil {
+		t.Fatalf("state.json has no space %s", spaceId)
+	}
+	sp["setupVersion"] = 1
+	writeFile(t, path, mustJSON(st))
+	apiPost(t, "/v1/spaces/"+spaceId+"/modify", map[string]any{"objectId": dvHost, "dataset": "dataviews", "records": []map[string]any{
+		{"id": "default", "ops": []map[string]any{{"type": "$set", "path": "setupVersion", "value": 1}}}}}, nil)
 }

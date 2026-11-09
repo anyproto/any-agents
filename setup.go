@@ -369,14 +369,15 @@ func ensureViews(c *Client, sp *Space) error {
 	newest := []string{"-createdAt"}
 	byDate := func(bundle, xkey string) []string { return []string{"-" + propPath(sp, bundle, xkey), "-createdAt"} }
 	open := map[string]any{propPath(sp, "task", "status"): map[string]any{"$in": []string{"todo", "in_progress"}}}
+	me := []any{map[string]any{"$var": "me"}}
 	views := map[string]struct {
 		name  string
 		views []view
 	}{
 		"doc": {"Docs", []view{{"default", "Table", byDate("doc", "date"), nil, []string{"kind", "project", "author", "linear", "pr", "originSession", "date"}}}},
 		"task": {"Tasks", []view{
-			{"default", "Open", []string{"-modifiedAt"}, open, []string{"status", "priority", "assignee", "linearKey", "project", "target", "due"}},
-			{"all", "All", []string{"-" + propPath(sp, "doc", "date")}, nil, []string{"status", "priority", "assignee", "linearKey", "handledBy", "handledIn"}}}},
+			{"default", "Open", []string{"-modifiedAt"}, open, []string{"status", "priority", "assignee", "doc.project", "linearKey", "doc.pr", "target", "due", "doc.date"}},
+			{"all", "All", byDate("doc", "date"), nil, []string{"status", "priority", "assignee", "doc.project", "linearKey", "doc.pr", "doc.date", "handledBy", "handledIn"}}}},
 		"session": {"Sessions", []view{{"default", "Table", byDate("session", "startedAt"), nil, []string{"status", "tool", "project", "machine", "owner", "linear", "startedAt", "summary"}}}},
 		"project": {"Projects", []view{{"default", "Table", newest, nil, []string{"status", "memories", "lastActivity"}}}},
 		"machine": {"Machines", []view{{"default", "Table", newest, nil, []string{"status", "lastSeen", "os", "tools"}}}},
@@ -390,6 +391,24 @@ func ensureViews(c *Client, sp *Space) error {
 		}{"Collabs", []view{
 			{"default", "Open", byDate("collab", "date"), active, []string{"status", "requester", "assignees", "project", "pr", "date"}},
 			{"all", "All", byDate("collab", "date"), nil, []string{"status", "requester", "assignees", "project", "pr", "date", "resolvedAt"}}}}
+		if sp.Kind == kindCollab {
+			cv := views["collab"]
+			cv.views = append(cv.views, view{"mine", "For You", byDate("collab", "date"),
+				map[string]any{"$and": []any{active, map[string]any{"$or": []any{
+					map[string]any{propPath(sp, "collab", "requester"): map[string]any{"$all": me}},
+					map[string]any{propPath(sp, "collab", "assignees"): map[string]any{"$all": me}}}}}},
+				[]string{"status", "requester", "assignees", "doneWhen", "project", "pr", "date"}})
+			views["collab"] = cv
+		}
+	}
+	// In a shared space, "For You" is what the member is on: the collabs
+	// they requested or help with, the tasks assigned to them.
+	if sp.Kind == kindCollab {
+		tv := views["task"]
+		tv.views = append(tv.views, view{"mine", "For You", []string{"-modifiedAt"},
+			map[string]any{"$and": []any{open, map[string]any{propPath(sp, "task", "assignee"): map[string]any{"$all": me}}}},
+			[]string{"status", "priority", "assignee", "doc.project", "linearKey", "doc.pr", "due", "doc.date"}})
+		views["task"] = tv
 	}
 	if sp.has("release") {
 		views["release"] = struct {
@@ -420,10 +439,36 @@ func ensureViews(c *Client, sp *Space) error {
 		if err := set("dataviews", "default", map[string]any{"name": v.name, "pos": "a0"}); err != nil {
 			return err
 		}
+		// A view edited in any-ui carries an anyUi block and belongs to
+		// the humans from then on; a hand-made view with a stock view's
+		// name makes the stock one redundant.
+		existing, names := map[string]map[string]any{}, map[string]bool{}
+		if rows, err := c.QueryRecords(sp.Id, dv, "views", nil, nil, 50); err == nil {
+			for _, r := range rows {
+				id, _ := r["id"].(string)
+				existing[id] = r
+				if n, _ := r["name"].(string); n != "" {
+					names[n] = true
+				}
+			}
+		}
 		for i, vw := range v.views {
+			if cur, ok := existing[vw.id]; ok {
+				if _, human := cur["anyUi"]; human {
+					continue
+				}
+			} else if names[vw.name] {
+				continue
+			}
+			// columns are the bundle's properties, or another bundle's as
+			// "bundle.xkey" (a task's project and date live on its Doc)
 			visible := []string{"name"}
 			for _, x := range vw.cols {
-				if id := sp.prop(name, x); id != "" {
+				b, key := name, x
+				if dot := strings.Index(x, "."); dot > 0 {
+					b, key = x[:dot], x[dot+1:]
+				}
+				if id := sp.prop(b, key); id != "" {
 					visible = append(visible, id)
 				}
 			}
@@ -433,8 +478,9 @@ func ensureViews(c *Client, sp *Space) error {
 			}
 			if err := set("views", vw.id, map[string]any{
 				"dataview": "default", "name": vw.name, "layout": "table", "pos": lexPos(i),
-				"query":          map[string]any{"type": "plain", "filter": bundleFilter(sp, name, extra...), "sort": vw.sort},
-				"layoutSettings": map[string]any{"visible": visible, "order": visible},
+				"query": map[string]any{"type": "plain", "filter": bundleFilter(sp, name, extra...), "sort": vw.sort},
+				"layoutSettings": map[string]any{"visible": visible, "order": visible,
+					"clickToOpen": true, "openMode": "full-screen"},
 			}); err != nil {
 				return err
 			}
