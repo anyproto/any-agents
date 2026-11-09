@@ -454,7 +454,7 @@ func ensureViews(c *Client, sp *Space) error {
 		}
 		for i, vw := range v.views {
 			if cur, ok := existing[vw.id]; ok {
-				if _, human := cur["anyUi"]; human {
+				if editedInUI(cur) {
 					continue
 				}
 			} else if names[vw.name] {
@@ -490,6 +490,20 @@ func ensureViews(c *Client, sp *Space) error {
 		}
 	}
 	return nil
+}
+
+// editedInUI reports whether any-ui's view editor saved the view: it
+// keeps its state in an anyUi block inside the query.
+func editedInUI(view map[string]any) bool {
+	if _, ok := view["anyUi"]; ok {
+		return true
+	}
+	if q, ok := view["query"].(map[string]any); ok {
+		if _, ok := q["anyUi"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // viewsVersion is the setup version recorded on a dataview's default

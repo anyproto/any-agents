@@ -1364,7 +1364,7 @@ func testCollabSpace(t *testing.T) {
 	if dvHost != "" {
 		bare := map[string]any{"visible": []string{"name"}, "order": []string{"name"}}
 		apiPost(t, "/v1/spaces/"+teamId+"/modify", map[string]any{"objectId": dvHost, "dataset": "views", "records": []map[string]any{
-			{"id": "all", "ops": []map[string]any{{"type": "$set", "path": "anyUi", "value": map[string]any{"version": 1}}, {"type": "$set", "path": "layoutSettings", "value": bare}}},
+			{"id": "all", "ops": []map[string]any{{"type": "$set", "path": "query.anyUi", "value": map[string]any{"version": 1}}, {"type": "$set", "path": "layoutSettings", "value": bare}}},
 			{"id": "default", "ops": []map[string]any{{"type": "$set", "path": "layoutSettings", "value": bare}}},
 		}}, nil)
 		lowerSetupVersion(t, homeA, teamId, dvHost)
@@ -1388,7 +1388,7 @@ func testCollabSpace(t *testing.T) {
 		}
 		// back to stock
 		apiPost(t, "/v1/spaces/"+teamId+"/modify", map[string]any{"objectId": dvHost, "dataset": "views", "records": []map[string]any{
-			{"id": "all", "ops": []map[string]any{{"type": "$unset", "path": "anyUi"}}}}}, nil)
+			{"id": "all", "ops": []map[string]any{{"type": "$unset", "path": "query.anyUi"}}}}}, nil)
 		lowerSetupVersion(t, homeA, teamId, dvHost)
 		runCLI(t, runOpts{sid: sidA}, "collab", "list", "--space", teamName)
 	}
