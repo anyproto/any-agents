@@ -2235,12 +2235,14 @@ func searchJSON(t *testing.T, query string) []searchHit {
 	t.Helper()
 	out, _ := runCLI(t, runOpts{sid: sidA}, "search", query, "--json")
 	var res struct {
-		Hits []searchHit `json:"hits"`
-		Mode string      `json:"mode"`
+		Hits       []searchHit `json:"hits"`
+		Mode       string      `json:"mode"`
+		ScoreScale string      `json:"scoreScale"`
 	}
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("search --json: %v\n%s", err, out)
 	}
+	searchScoreScale = res.ScoreScale
 	return res.Hits
 }
 
@@ -2377,7 +2379,7 @@ func testPromptHook(t *testing.T) {
 		hits = searchJSON(t, travel)
 		found := 0
 		for _, h := range hits {
-			if h.Score >= ragMinScore && (h.RecordId == other+":flombastic-rule" || h.RecordId == other+":flombastic-parser") {
+			if h.Score >= ragMinScore() && (h.RecordId == other+":flombastic-rule" || h.RecordId == other+":flombastic-parser") {
 				found++
 			}
 		}
@@ -2390,8 +2392,17 @@ func testPromptHook(t *testing.T) {
 	}
 }
 
-// ragMinScore mirrors the hook's default gate (ANY_AGENTS_RAG_MIN).
-const ragMinScore = 0.030
+// searchScoreScale is the score scale of the last searchJSON reply.
+var searchScoreScale string
+
+// ragMinScore mirrors the hook's default gate for the server's score
+// scale (ANY_AGENTS_RAG_MIN).
+func ragMinScore() float64 {
+	if searchScoreScale == "unit" {
+		return 0.90
+	}
+	return 0.030
+}
 
 // recallWouldPick reports whether auto-recall would inject objectId's body:
 // the hit must clear the score gate and land in the first three hits of an
@@ -2399,7 +2410,7 @@ const ragMinScore = 0.030
 func recallWouldPick(sp *spaceState, hits []searchHit, objectId string) bool {
 	n := 0
 	for _, h := range hits {
-		if h.Score < ragMinScore {
+		if h.Score < ragMinScore() {
 			continue
 		}
 		if h.ObjectId == sp.owner("app") && h.Dataset == "editor_blocks" {

@@ -532,7 +532,12 @@ type SearchResult struct {
 	Hits         []SearchHit `json:"hits"`
 	Mode         string      `json:"mode"`
 	VectorStatus string      `json:"vectorStatus"`
+	// ScoreScale is "unit" when hybrid content scores read 0–1; absent
+	// from a server that returns the raw RRF sum.
+	ScoreScale string `json:"scoreScale"`
 }
+
+const scoreScaleUnit = "unit"
 
 // Search runs the space's hybrid search. Objects in any-ui's bin are
 // left out, as every listing leaves them out.

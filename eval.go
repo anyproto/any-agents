@@ -23,7 +23,7 @@ type goldenEntry struct {
 func cmdEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	golden := fs.String("golden", filepath.Join(stateDir(), "eval", "golden.json"), "golden set file")
-	minScore := fs.Float64("min", 0.030, "RAG injection threshold to simulate")
+	minScore := fs.Float64("min", 0, "RAG injection threshold to simulate (0 = the hook's own for the server's score scale)")
 	verbose := fs.Bool("v", false, "print every query, not just misses")
 	_ = fs.Parse(args)
 	b, err := os.ReadFile(*golden)
@@ -48,7 +48,11 @@ func cmdEval(args []string) {
 			fatal(err)
 		}
 		// The hook's own gate, so the simulation stays faithful.
-		wouldInject := recallPick(c, sp, scope, res.Hits, *minScore, nil, 3)
+		floor := *minScore
+		if floor == 0 {
+			floor = ragMinScore(res.ScoreScale)
+		}
+		wouldInject := recallPick(c, sp, scope, res.Hits, floor, nil, 3)
 		if len(e.Expect) == 0 {
 			negs++
 			if len(wouldInject) > 0 {

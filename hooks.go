@@ -206,7 +206,7 @@ func hookPrompt(tool Tool) {
 			if err != nil {
 				return
 			}
-			for _, h := range recallPick(c, sp, scope, res.Hits, ragMinScore(), seen, 3) {
+			for _, h := range recallPick(c, sp, scope, res.Hits, ragMinScore(res.ScoreScale), seen, 3) {
 				results[i] = append(results[i], hit{sp, h})
 			}
 		}(i, sp)
@@ -313,8 +313,15 @@ func hookStop(tool Tool) {
 	}
 }
 
-func ragMinScore() float64 {
-	minScore := 0.030
+// ragMinScore is the injection floor for a reply on the given score
+// scale. On the unit scale (0–1, 1 = first on every fused leg) it is
+// 0.90, or ANY_AGENTS_RAG_MIN. A server without the scale returns the
+// raw RRF sum, gated at 0.030.
+func ragMinScore(scale string) float64 {
+	if scale != scoreScaleUnit {
+		return 0.030
+	}
+	minScore := 0.90
 	if v := os.Getenv("ANY_AGENTS_RAG_MIN"); v != "" {
 		fmt.Sscanf(v, "%f", &minScore)
 	}
