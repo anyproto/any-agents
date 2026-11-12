@@ -23,7 +23,7 @@ type goldenEntry struct {
 func cmdEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	golden := fs.String("golden", filepath.Join(stateDir(), "eval", "golden.json"), "golden set file")
-	minScore := fs.Float64("min", 0, "RAG injection threshold to simulate (0 = the hook's own for the server's score scale)")
+	minScore := fs.Float64("min", -1, "RAG injection threshold to simulate (default: the hook's own for the server's score scale)")
 	verbose := fs.Bool("v", false, "print every query, not just misses")
 	_ = fs.Parse(args)
 	b, err := os.ReadFile(*golden)
@@ -42,14 +42,15 @@ func cmdEval(args []string) {
 	var pos, hit1, hit3, injected int
 	var mrr float64
 	var negs, negFP, negFPHits int
+	var floor float64
 	for _, e := range entries {
 		res, err := c.Search(sp.Id, e.Query, 10)
 		if err != nil {
 			fatal(err)
 		}
 		// The hook's own gate, so the simulation stays faithful.
-		floor := *minScore
-		if floor == 0 {
+		floor = *minScore
+		if floor < 0 {
 			floor = ragMinScore(res.ScoreScale)
 		}
 		wouldInject := recallPick(c, sp, scope, res.Hits, floor, nil, 3)
@@ -107,6 +108,7 @@ func cmdEval(args []string) {
 	fmt.Printf("\npositives: %d  hit@1 %.0f%%  hit@3 %.0f%%  MRR %.3f  auto-injected %.0f%%\n",
 		pos, pct(hit1, pos), pct(hit3, pos), mrr/float64(max(pos, 1)), pct(injected, pos))
 	fmt.Printf("negatives: %d  false-positive prompts %d (%d hits injected)\n", negs, negFP, negFPHits)
+	fmt.Printf("injection floor: %.3f\n", floor)
 }
 
 func rankStr(r int) string {

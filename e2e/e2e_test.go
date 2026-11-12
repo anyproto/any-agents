@@ -2374,20 +2374,24 @@ func testPromptHook(t *testing.T) {
 				"title": "Where the flombastic parser lives", "body": "The flombastic parser lives in pkg/flomb and panics on empty input.", "links": []string{}, "origin": "e2e"}},
 		},
 	}, nil)
-	travel := "What do I need to know about flombastic verbs and the flombastic parser before I touch them?"
-	waitFor(t, 30*time.Second, "the other project's memories to clear the recall gate", func() bool {
-		hits = searchJSON(t, travel)
-		found := 0
-		for _, h := range hits {
-			if h.Score >= ragMinScore() && (h.RecordId == other+":flombastic-rule" || h.RecordId == other+":flombastic-parser") {
-				found++
+	// one prompt per memory: on the unit scale only the top hit clears the gate
+	clears := func(prompt, recordId string) {
+		waitFor(t, 30*time.Second, recordId+" to clear the recall gate", func() bool {
+			hits = searchJSON(t, prompt)
+			for _, h := range hits {
+				if h.Score >= ragMinScore() && h.RecordId == recordId {
+					return true
+				}
 			}
-		}
-		return found == 2
-	})
-	ctx := promptHook(t, sidP, travel)
-	mustContain(t, ctx, other+":flombastic-rule", "another project's feedback memory is recalled")
-	if strings.Contains(ctx, other+":flombastic-parser") {
+			return false
+		})
+	}
+	rulePrompt := "Which review do flombastic verbs always get before a merge?"
+	clears(rulePrompt, other+":flombastic-rule")
+	mustContain(t, promptHook(t, sidP, rulePrompt), other+":flombastic-rule", "another project's feedback memory is recalled")
+	parserPrompt := "Where does the flombastic parser live and what does it do on empty input?"
+	clears(parserPrompt, other+":flombastic-parser")
+	if ctx := promptHook(t, sidP, parserPrompt); strings.Contains(ctx, other+":flombastic-parser") {
 		t.Errorf("another project's project memory was recalled:\n%s", ctx)
 	}
 }

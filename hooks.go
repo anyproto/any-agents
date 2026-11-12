@@ -315,8 +315,8 @@ func hookStop(tool Tool) {
 
 // ragMinScore is the injection floor for a reply on the given score
 // scale. On the unit scale (0–1, 1 = first on every fused leg) it is
-// 0.90, or ANY_AGENTS_RAG_MIN. A server without the scale returns the
-// raw RRF sum, gated at 0.030.
+// 0.90, or ANY_AGENTS_RAG_MIN. A reply without the scale is gated at
+// 0.030, the floor for a raw RRF sum; the variable does not apply there.
 func ragMinScore(scale string) float64 {
 	if scale != scoreScaleUnit {
 		return 0.030
