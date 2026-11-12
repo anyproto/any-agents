@@ -24,7 +24,7 @@ type goldenEntry struct {
 func cmdEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	golden := fs.String("golden", filepath.Join(stateDir(), "eval", "golden.json"), "golden set file")
-	minScore := fs.Float64("min", -1, "RAG injection threshold to simulate; negative = the hook's own gate for each reply")
+	minScore := fs.Float64("min", -1, "RAG injection floor to simulate on hybrid replies; negative = the hook's own floor for each reply")
 	verbose := fs.Bool("v", false, "print every query, not just misses")
 	_ = fs.Parse(args)
 	b, err := os.ReadFile(*golden)
@@ -50,18 +50,19 @@ func cmdEval(args []string) {
 		if err != nil {
 			fatal(err)
 		}
-		// The hook's own gate, so the simulation stays faithful.
-		floor, ok := *minScore, true
-		if floor < 0 {
-			floor, ok = ragFloor(res)
-		}
-		if res.Mode != searchModeHybrid {
-			notHybrid++
+		// The hook's own gate, so the simulation stays faithful: --min
+		// replaces the floor only, and a reply that is not hybrid
+		// injects nothing.
+		floor, ok := ragFloor(res)
+		if ok && *minScore >= 0 {
+			floor = *minScore
 		}
 		var wouldInject []SearchHit
 		if ok {
 			floors[floor]++
 			wouldInject = recallPick(c, sp, scope, res.Hits, floor, nil, 3)
+		} else {
+			notHybrid++
 		}
 		if len(e.Expect) == 0 {
 			negs++
