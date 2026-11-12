@@ -125,8 +125,12 @@ setup: [docs/migrating-from-any-claude.md](docs/migrating-from-any-claude.md).
   digest (open requests nobody took, new messages on your collabs).
 - **prompt** auto-recall: hybrid search over the private space and every
   collab space with the prompt; up to 3 hits (memories, feedback notes
-  and page bodies) above `ANY_AGENTS_RAG_MIN` (default 0.030) are
+  and page bodies) above `ANY_AGENTS_RAG_MIN` (default 0.90, on the server's 0–1 hybrid
+  score; a server that returns the raw RRF sum is gated at a fixed 0.030) are
   injected once per session each, collab hits labelled with their space.
+  Only a hybrid reply injects. A full-text reply injects nothing: a
+  server without an embedder never injects, and one whose embedder is
+  down, loading or slower than the query budget skips that prompt.
 - **post-tool** pushes memory files and config files as they change.
 - **session-end** closes the Session, attaches the gzipped transcript,
   pushes config and memory, regenerates the status page and flushes stats.
@@ -217,7 +221,7 @@ span every space set up here and each row ends with its space name.
 
 Env: `ANY_AGENTS_ADDR` (default: the running server recorded in
 `~/.any/*/server.addr`, else `127.0.0.1:2046`), `ANY_AGENTS_SPACE` (`Agents`,
-the private space name), `ANY_AGENTS_RAG_MIN` (`0.030`), `ANY_AGENTS_TOOL`
+the private space name), `ANY_AGENTS_RAG_MIN` (`0.90`), `ANY_AGENTS_TOOL`
 (`claude` or `codex`, auto-detected inside a Codex thread), `ANY_AGENTS_HOME` (`~/.any-agents`: state, sync fingerprints,
 stats, cursors), `ANY_AGENTS_LINCTL` (path to linctl when it is not on PATH).
 

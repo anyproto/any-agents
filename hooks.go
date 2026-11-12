@@ -206,7 +206,11 @@ func hookPrompt(tool Tool) {
 			if err != nil {
 				return
 			}
-			for _, h := range recallPick(c, sp, scope, res.Hits, ragMinScore(), seen, 3) {
+			floor, ok := ragFloor(res)
+			if !ok {
+				return
+			}
+			for _, h := range recallPick(c, sp, scope, res.Hits, floor, seen, 3) {
 				results[i] = append(results[i], hit{sp, h})
 			}
 		}(i, sp)
@@ -313,12 +317,26 @@ func hookStop(tool Tool) {
 	}
 }
 
-func ragMinScore() float64 {
-	minScore := 0.030
+// ragFloor is the injection floor for a search reply, and whether the
+// reply may inject at all. Only a hybrid reply does: a full-text reply
+// (no embedder on the server, or one that is down, loading, over its
+// budget or at another dimension than the index) scores by BM25, which
+// no fixed floor gates. On the unit scale (0–1,
+// 1 = first on every fused leg) the floor is 0.90, or
+// ANY_AGENTS_RAG_MIN; a hybrid reply without the scale carries the raw
+// RRF sum, gated at 0.030, and the variable does not apply there.
+func ragFloor(res *SearchResult) (float64, bool) {
+	if res.Mode != searchModeHybrid {
+		return 0, false
+	}
+	if res.ScoreScale != scoreScaleUnit {
+		return 0.030, true
+	}
+	minScore := 0.90
 	if v := os.Getenv("ANY_AGENTS_RAG_MIN"); v != "" {
 		fmt.Sscanf(v, "%f", &minScore)
 	}
-	return minScore
+	return minScore, true
 }
 
 // recallPick applies the injection gate: threshold, dataset allowlist
