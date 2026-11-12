@@ -128,6 +128,8 @@ setup: [docs/migrating-from-any-claude.md](docs/migrating-from-any-claude.md).
   and page bodies) above `ANY_AGENTS_RAG_MIN` (default 0.90, on the server's 0–1 hybrid
   score; a server that returns the raw RRF sum is gated at a fixed 0.030) are
   injected once per session each, collab hits labelled with their space.
+  Only a hybrid reply injects: while the embedder is down or loading, the
+  search falls back to full text and nothing is injected.
 - **post-tool** pushes memory files and config files as they change.
 - **session-end** closes the Session, attaches the gzipped transcript,
   pushes config and memory, regenerates the status page and flushes stats.

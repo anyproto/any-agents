@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // Recall-quality eval: replays a golden set of paraphrased queries
@@ -23,7 +24,7 @@ type goldenEntry struct {
 func cmdEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	golden := fs.String("golden", filepath.Join(stateDir(), "eval", "golden.json"), "golden set file")
-	minScore := fs.Float64("min", -1, "RAG injection threshold to simulate (default: the hook's own for the server's score scale)")
+	minScore := fs.Float64("min", -1, "RAG injection threshold to simulate; negative = the hook's own gate for each reply")
 	verbose := fs.Bool("v", false, "print every query, not just misses")
 	_ = fs.Parse(args)
 	b, err := os.ReadFile(*golden)
@@ -42,18 +43,25 @@ func cmdEval(args []string) {
 	var pos, hit1, hit3, injected int
 	var mrr float64
 	var negs, negFP, negFPHits int
-	var floor float64
+	floors := map[float64]int{} // floor → replies gated at it
+	notHybrid := 0              // replies the hook's gate lets inject nothing
 	for _, e := range entries {
 		res, err := c.Search(sp.Id, e.Query, 10)
 		if err != nil {
 			fatal(err)
 		}
 		// The hook's own gate, so the simulation stays faithful.
-		floor = *minScore
+		floor, ok := *minScore, true
 		if floor < 0 {
-			floor = ragMinScore(res.ScoreScale)
+			floor, ok = ragFloor(res)
 		}
-		wouldInject := recallPick(c, sp, scope, res.Hits, floor, nil, 3)
+		var wouldInject []SearchHit
+		if ok {
+			floors[floor]++
+			wouldInject = recallPick(c, sp, scope, res.Hits, floor, nil, 3)
+		} else {
+			notHybrid++
+		}
 		if len(e.Expect) == 0 {
 			negs++
 			if len(wouldInject) > 0 {
@@ -108,7 +116,17 @@ func cmdEval(args []string) {
 	fmt.Printf("\npositives: %d  hit@1 %.0f%%  hit@3 %.0f%%  MRR %.3f  auto-injected %.0f%%\n",
 		pos, pct(hit1, pos), pct(hit3, pos), mrr/float64(max(pos, 1)), pct(injected, pos))
 	fmt.Printf("negatives: %d  false-positive prompts %d (%d hits injected)\n", negs, negFP, negFPHits)
-	fmt.Printf("injection floor: %.3f\n", floor)
+	keys := make([]float64, 0, len(floors))
+	for f := range floors {
+		keys = append(keys, f)
+	}
+	sort.Float64s(keys)
+	for _, f := range keys {
+		fmt.Printf("injection floor %.3f: %d replies\n", f, floors[f])
+	}
+	if notHybrid > 0 {
+		fmt.Printf("not hybrid, nothing injected: %d replies\n", notHybrid)
+	}
 }
 
 func rankStr(r int) string {

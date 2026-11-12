@@ -28,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -2242,7 +2243,7 @@ func searchJSON(t *testing.T, query string) []searchHit {
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("search --json: %v\n%s", err, out)
 	}
-	searchScoreScale = res.ScoreScale
+	searchScoreScale, searchMode = res.ScoreScale, res.Mode
 	return res.Hits
 }
 
@@ -2396,13 +2397,18 @@ func testPromptHook(t *testing.T) {
 	}
 }
 
-// searchScoreScale is the score scale of the last searchJSON reply.
-var searchScoreScale string
+// searchScoreScale and searchMode are the score scale and the mode of
+// the last searchJSON reply.
+var searchScoreScale, searchMode string
 
-// ragMinScore mirrors the hook's default gate for the server's score
-// scale (ANY_AGENTS_RAG_MIN).
+// ragMinScore mirrors the hook's default gate for the last reply: its
+// floor on the reply's score scale (ANY_AGENTS_RAG_MIN), and no hit
+// passes a reply that is not hybrid.
 func ragMinScore() float64 {
-	if searchScoreScale == "unit" {
+	switch {
+	case searchMode != "hybrid":
+		return math.Inf(1)
+	case searchScoreScale == "unit":
 		return 0.90
 	}
 	return 0.030

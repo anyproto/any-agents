@@ -539,6 +539,9 @@ type SearchResult struct {
 
 const scoreScaleUnit = "unit"
 
+// searchModeHybrid is the mode of a reply that fused both legs.
+const searchModeHybrid = "hybrid"
+
 // Search runs the space's hybrid search. Objects in any-ui's bin are
 // left out, as every listing leaves them out.
 func (c *Client) Search(space, query string, limit int) (*SearchResult, error) {
