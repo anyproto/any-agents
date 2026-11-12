@@ -44,7 +44,7 @@ func cmdEval(args []string) {
 	var mrr float64
 	var negs, negFP, negFPHits int
 	floors := map[float64]int{} // floor → replies gated at it
-	notHybrid := 0              // replies the hook's gate lets inject nothing
+	notHybrid := 0              // replies scored by BM25: the hook injects nothing from them
 	for _, e := range entries {
 		res, err := c.Search(sp.Id, e.Query, 10)
 		if err != nil {
@@ -55,12 +55,13 @@ func cmdEval(args []string) {
 		if floor < 0 {
 			floor, ok = ragFloor(res)
 		}
+		if res.Mode != searchModeHybrid {
+			notHybrid++
+		}
 		var wouldInject []SearchHit
 		if ok {
 			floors[floor]++
 			wouldInject = recallPick(c, sp, scope, res.Hits, floor, nil, 3)
-		} else {
-			notHybrid++
 		}
 		if len(e.Expect) == 0 {
 			negs++
@@ -125,7 +126,7 @@ func cmdEval(args []string) {
 		fmt.Printf("injection floor %.3f: %d replies\n", f, floors[f])
 	}
 	if notHybrid > 0 {
-		fmt.Printf("not hybrid, nothing injected: %d replies\n", notHybrid)
+		fmt.Printf("not hybrid (the hook injects nothing from them): %d replies\n", notHybrid)
 	}
 }
 

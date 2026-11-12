@@ -2236,14 +2236,15 @@ func searchJSON(t *testing.T, query string) []searchHit {
 	t.Helper()
 	out, _ := runCLI(t, runOpts{sid: sidA}, "search", query, "--json")
 	var res struct {
-		Hits       []searchHit `json:"hits"`
-		Mode       string      `json:"mode"`
-		ScoreScale string      `json:"scoreScale"`
+		Hits         []searchHit `json:"hits"`
+		Mode         string      `json:"mode"`
+		ScoreScale   string      `json:"scoreScale"`
+		VectorStatus string      `json:"vectorStatus"`
 	}
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("search --json: %v\n%s", err, out)
 	}
-	searchScoreScale, searchMode = res.ScoreScale, res.Mode
+	searchScoreScale, searchMode, searchVectorStatus = res.ScoreScale, res.Mode, res.VectorStatus
 	return res.Hits
 }
 
@@ -2327,6 +2328,10 @@ func testFeedbackAndStats(t *testing.T) {
 
 func testPromptHook(t *testing.T) {
 	mustHaveSearchIndex(t)
+	// Auto-recall injects from hybrid replies only.
+	if searchJSON(t, "ping"); searchVectorStatus == "disabled" {
+		t.Skip("the server runs without an embedder: every reply is full text and auto-recall injects nothing")
+	}
 	ps := loadStateT(t, homeA).priv()
 	prompt := "Remind me what the " + phrase + " actually means for this project"
 	// Body scores climb while the index warms, so wait until the doc would
@@ -2397,9 +2402,9 @@ func testPromptHook(t *testing.T) {
 	}
 }
 
-// searchScoreScale and searchMode are the score scale and the mode of
-// the last searchJSON reply.
-var searchScoreScale, searchMode string
+// searchScoreScale, searchMode and searchVectorStatus are the score
+// scale, the mode and the vector status of the last searchJSON reply.
+var searchScoreScale, searchMode, searchVectorStatus string
 
 // ragMinScore mirrors the hook's default gate for the last reply: its
 // floor on the reply's score scale (ANY_AGENTS_RAG_MIN), and no hit

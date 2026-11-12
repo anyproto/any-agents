@@ -318,9 +318,10 @@ func hookStop(tool Tool) {
 }
 
 // ragFloor is the injection floor for a search reply, and whether the
-// reply may inject at all. Only a hybrid reply does: one that fell back
-// to a single leg (the embedder is down or still loading) scores by
-// BM25 or cosine, which no fixed floor gates. On the unit scale (0–1,
+// reply may inject at all. Only a hybrid reply does: a full-text reply
+// (no embedder on the server, or one that is down, loading, over its
+// budget or at another dimension than the index) scores by BM25, which
+// no fixed floor gates. On the unit scale (0–1,
 // 1 = first on every fused leg) the floor is 0.90, or
 // ANY_AGENTS_RAG_MIN; a hybrid reply without the scale carries the raw
 // RRF sum, gated at 0.030, and the variable does not apply there.
