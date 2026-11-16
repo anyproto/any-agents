@@ -107,3 +107,41 @@ func TestRefusedConnectionIsRetried(t *testing.T) {
 		t.Fatalf("want serverDownError after ~3s, got %v after %v", err, time.Since(start))
 	}
 }
+
+// The attempt after the last sleep still runs: a server back right at the
+// end of the outage budget is not reported down.
+func TestWaitLastAttemptRuns(t *testing.T) {
+	back := time.Now().Add(2500 * time.Millisecond)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if time.Now().Before(back) {
+			w.WriteHeader(503)
+			_, _ = w.Write([]byte(`{"error":{"code":"server.unavailable","message":"x"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	})
+	old := maxOutage
+	maxOutage = 3 * time.Second
+	defer func() { maxOutage = old }()
+	_, _, err := collabWait(c, &State{}, &Space{Id: "sp"}, "obj", 3200*time.Millisecond, false)
+	var down *serverDownError
+	if errors.As(err, &down) {
+		t.Fatalf("server was back before the budget ended, got %v", err)
+	}
+}
+
+// No cursor yet and the server down at the start: no empty cursor is
+// recorded, so the backlog does not wake the agent after the restart.
+func TestWaitNoCursorWhileDown(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		_, _ = w.Write([]byte(`{"error":{"code":"server.unavailable","message":"x"}}`))
+	})
+	old := maxOutage
+	maxOutage = time.Second
+	defer func() { maxOutage = old }()
+	_, _, _ = collabWait(c, &State{}, &Space{Id: "sp"}, "obj-nocursor", time.Hour, false)
+	if _, ok := loadCursor("obj-nocursor"); ok {
+		t.Fatal("a cursor was saved while the server was down")
+	}
+}

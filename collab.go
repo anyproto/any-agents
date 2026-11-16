@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -568,6 +569,9 @@ func memberNames(members map[string]string, links []string) []string {
 // retries through.
 var maxOutage = 30 * time.Second
 
+// pollTimeout bounds one request of a wait.
+var pollTimeout = 15 * time.Second
+
 // serverDownError: the server stayed unavailable until the wait's timeout.
 type serverDownError struct{ last error }
 
@@ -608,24 +612,19 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		}
 		return ""
 	}
-	if _, ok := loadCursor(id); !ok {
-		// No cursor on this machine: the backlog is `collab show`'s job;
-		// wait starts from now. A collab opened here has an empty cursor
-		// and every reply counts.
-		if msgs, err := chatTail(c, sp, id, 1); err == nil && len(msgs) > 0 {
-			saveCursor(id, maxVerOf(msgs[0]))
-		} else {
-			saveCursor(id, "")
-		}
-	}
-	// The cursor is read once: a sibling waiter of the same member that
-	// advances the shared cursor must not hide the message from this one.
-	cursor, _ := loadCursor(id)
+	// No cursor on this machine: the backlog is `collab show`'s job; wait
+	// starts from now. A collab opened here has an empty cursor and every
+	// reply counts. Taken inside the loop so a server that is down at the
+	// start is waited out instead of recording an empty cursor.
+	_, haveCursor := loadCursor(id)
+	var cursor string
+	cursorRead := false
 	// A restarting server (network error, 502-504, 401 auth.required) is
 	// waited out silently: exiting would wake the agent for nothing. Backoff
 	// 2s doubling to 30s with jitter, reset on success. The outage is given
 	// maxOutage in all (and never past the deadline): a restart is over by
 	// then, a longer one means the app is closed and the agent should know.
+	// The attempt after the last sleep still runs; only its failure gives up.
 	var downSince time.Time
 	delay := 2 * time.Second
 	down := func(err error) error {
@@ -636,35 +635,77 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		if deadline.Before(giveUp) {
 			giveUp = deadline
 		}
-		sleep := delay + time.Duration(rand.Int63n(int64(delay)/5+1))
-		if left := time.Until(giveUp); sleep > left {
-			sleep = left
-		}
-		if sleep > 0 {
-			time.Sleep(sleep)
-		}
-		if !time.Now().Before(giveUp) {
+		left := time.Until(giveUp)
+		if left <= 0 {
 			return &serverDownError{err}
 		}
+		sleep := delay + time.Duration(rand.Int63n(int64(delay)/5+1))
+		if sleep > left {
+			sleep = left
+		}
+		time.Sleep(sleep)
 		if delay *= 2; delay > 30*time.Second {
 			delay = 30 * time.Second
 		}
 		return nil
 	}
-	for {
-		msgs, err := chatSince(c, sp, id, cursor, 50)
-		if err != nil {
-			if !transient(err) {
-				return nil, "", err
+	// fail handles a transport failure: false when err is not transient.
+	fail := func(err error) (bool, error) {
+		if !transient(err) {
+			return false, nil
+		}
+		if _, isAPI := err.(*apiError); !isAPI {
+			// The app may have come back on another port, but only the
+			// server of my own account will do.
+			if addr := rediscoverAddr(st); addr != "" {
+				c.base = "http://" + addr
 			}
-			if _, isAPI := err.(*apiError); !isAPI {
-				// The app may have come back on another port, but only the
-				// server of my own account will do.
-				if addr := rediscoverAddr(st); addr != "" {
-					c.base = "http://" + addr
+		}
+		return true, down(err)
+	}
+	for {
+		// One poll never outlives the wait or a stuck server: a hung app
+		// (not a restart) would otherwise hold a request for the 90s client
+		// timeout.
+		pollFor := pollTimeout
+		if left := time.Until(deadline); left < pollFor {
+			pollFor = left
+		}
+		if pollFor < time.Second {
+			pollFor = time.Second
+		}
+		pc := *c
+		pc.hc = &http.Client{Transport: c.hc.Transport, Timeout: pollFor}
+		if !haveCursor {
+			msgs, err := chatTail(&pc, sp, id, 1)
+			if err != nil {
+				if retry, derr := fail(err); retry {
+					if derr != nil {
+						return nil, "", derr
+					}
+					continue
 				}
 			}
-			if derr := down(err); derr != nil {
+			if err == nil && len(msgs) > 0 {
+				saveCursor(id, maxVerOf(msgs[0]))
+			} else {
+				saveCursor(id, "")
+			}
+			haveCursor = true
+		}
+		if !cursorRead {
+			// Read once: a sibling waiter of the same member that advances
+			// the shared cursor must not hide the message from this one.
+			cursor, _ = loadCursor(id)
+			cursorRead = true
+		}
+		msgs, err := chatSince(&pc, sp, id, cursor, 50)
+		if err != nil {
+			retry, derr := fail(err)
+			if !retry {
+				return nil, "", err
+			}
+			if derr != nil {
 				return nil, "", derr
 			}
 			continue
@@ -672,12 +713,13 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		if !downSince.IsZero() {
 			// Back up: resume only once it is verified to be my account. The
 			// chat answer is dropped and fetched again after the check.
-			acc, aerr := c.Account()
+			acc, aerr := pc.Account()
 			if aerr != nil {
-				if !transient(aerr) {
+				retry, derr := fail(aerr)
+				if !retry {
 					return nil, "", aerr
 				}
-				if derr := down(aerr); derr != nil {
+				if derr != nil {
 					return nil, "", derr
 				}
 				continue

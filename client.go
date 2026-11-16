@@ -45,6 +45,9 @@ func isCode(err error, code string) bool {
 // transient reports whether err is the server being away rather than the
 // request being wrong: a network failure, a gateway status, or 401
 // auth.required while the app restarts and has not unlocked an account.
+// Any transport failure counts: *url.Error is a net.Error on every OS (the
+// syscall checks below are only belts; a refused dial on Windows is not
+// syscall.ECONNREFUSED, see golang/go#45621).
 func transient(err error) bool {
 	if err == nil {
 		return false
