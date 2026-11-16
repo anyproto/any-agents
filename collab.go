@@ -177,7 +177,7 @@ func cmdCollab(args []string) {
 			msgs, closedAs, err := collabWait(c, st, sp, id, timeout, fs.Lookup("all").Value.String() == "true")
 			var down *serverDownError
 			if errors.As(err, &down) {
-				fmt.Fprintf(os.Stderr, "any-agents: %v; run the wait again once the app is back\n", down)
+				fmt.Fprintf(os.Stderr, "any-agents: %v; the Any app is not running or not unlocked: do not rerun the wait in a loop, tell the user and rerun only once they say it is back\n", down)
 				os.Exit(2)
 			}
 			if err != nil {
@@ -601,7 +601,7 @@ func rediscoverAddr(st *State) string {
 // arrives (by default one that is not mine), or the timeout passes.
 func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duration, all bool) ([]map[string]any, string, error) {
 	deadline := time.Now().Add(timeout)
-	closed := func() string {
+	closed := func(c *Client) string {
 		row, err := c.GetObject(sp.Id, id)
 		if err != nil {
 			return ""
@@ -679,14 +679,16 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		if !haveCursor {
 			msgs, err := chatTail(&pc, sp, id, 1)
 			if err != nil {
-				if retry, derr := fail(err); retry {
-					if derr != nil {
-						return nil, "", derr
-					}
-					continue
+				retry, derr := fail(err)
+				if !retry {
+					return nil, "", err
 				}
+				if derr != nil {
+					return nil, "", derr
+				}
+				continue
 			}
-			if err == nil && len(msgs) > 0 {
+			if len(msgs) > 0 {
 				saveCursor(id, maxVerOf(msgs[0]))
 			} else {
 				saveCursor(id, "")
@@ -746,7 +748,7 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		if len(out) > 0 {
 			return out, "", nil
 		}
-		if s := closed(); s != "" {
+		if s := closed(&pc); s != "" {
 			return nil, s, nil
 		}
 		if time.Now().After(deadline) {
