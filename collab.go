@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -172,6 +174,11 @@ func cmdCollab(args []string) {
 		case "wait":
 			timeout, _ := time.ParseDuration(fs.Lookup("timeout").Value.String())
 			msgs, closedAs, err := collabWait(c, st, sp, id, timeout, fs.Lookup("all").Value.String() == "true")
+			var down *serverDownError
+			if errors.As(err, &down) {
+				fmt.Fprintf(os.Stderr, "any-agents: %v; run the wait again once the app is back\n", down)
+				os.Exit(2)
+			}
 			if err != nil {
 				fatal(err)
 			}
@@ -557,6 +564,35 @@ func memberNames(members map[string]string, links []string) []string {
 	return out
 }
 
+// maxOutage bounds one continuous stretch of unavailable server a wait
+// retries through.
+var maxOutage = 30 * time.Second
+
+// serverDownError: the server stayed unavailable until the wait's timeout.
+type serverDownError struct{ last error }
+
+func (e *serverDownError) Error() string {
+	return "server unavailable: " + e.last.Error()
+}
+
+// rediscoverAddr finds where my own account's server now listens, "" to
+// keep the current address: an environment or pinned address is
+// authoritative, and a server of another account is never taken.
+func rediscoverAddr(st *State) string {
+	if os.Getenv("ANY_AGENTS_ADDR") != "" || st.Addr != "" || st.Identity == "" {
+		return ""
+	}
+	if pin, err := readPin(); err != nil || pin != "" {
+		return ""
+	}
+	for _, s := range discoverServers(anyDataRoot(), 500*time.Millisecond) {
+		if s.Account == st.Identity {
+			return s.Addr
+		}
+	}
+	return ""
+}
+
 // collabWait polls the chat until a message newer than the cursor
 // arrives (by default one that is not mine), or the timeout passes.
 func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duration, all bool) ([]map[string]any, string, error) {
@@ -585,10 +621,73 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 	// The cursor is read once: a sibling waiter of the same member that
 	// advances the shared cursor must not hide the message from this one.
 	cursor, _ := loadCursor(id)
+	// A restarting server (network error, 502-504, 401 auth.required) is
+	// waited out silently: exiting would wake the agent for nothing. Backoff
+	// 2s doubling to 30s with jitter, reset on success. The outage is given
+	// maxOutage in all (and never past the deadline): a restart is over by
+	// then, a longer one means the app is closed and the agent should know.
+	var downSince time.Time
+	delay := 2 * time.Second
+	down := func(err error) error {
+		if downSince.IsZero() {
+			downSince = time.Now()
+		}
+		giveUp := downSince.Add(maxOutage)
+		if deadline.Before(giveUp) {
+			giveUp = deadline
+		}
+		sleep := delay + time.Duration(rand.Int63n(int64(delay)/5+1))
+		if left := time.Until(giveUp); sleep > left {
+			sleep = left
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+		if !time.Now().Before(giveUp) {
+			return &serverDownError{err}
+		}
+		if delay *= 2; delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+		return nil
+	}
 	for {
 		msgs, err := chatSince(c, sp, id, cursor, 50)
 		if err != nil {
-			return nil, "", err
+			if !transient(err) {
+				return nil, "", err
+			}
+			if _, isAPI := err.(*apiError); !isAPI {
+				// The app may have come back on another port, but only the
+				// server of my own account will do.
+				if addr := rediscoverAddr(st); addr != "" {
+					c.base = "http://" + addr
+				}
+			}
+			if derr := down(err); derr != nil {
+				return nil, "", derr
+			}
+			continue
+		}
+		if !downSince.IsZero() {
+			// Back up: resume only once it is verified to be my account. The
+			// chat answer is dropped and fetched again after the check.
+			acc, aerr := c.Account()
+			if aerr != nil {
+				if !transient(aerr) {
+					return nil, "", aerr
+				}
+				if derr := down(aerr); derr != nil {
+					return nil, "", derr
+				}
+				continue
+			}
+			if st.Identity != "" && acc.Id != st.Identity {
+				return nil, "", fmt.Errorf("the server now runs another account (%s, expected %s); not resuming", shortId(acc.Id), shortId(st.Identity))
+			}
+			downSince = time.Time{}
+			delay = 2 * time.Second
+			continue
 		}
 		var out []map[string]any
 		for _, m := range msgs {
