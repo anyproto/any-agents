@@ -28,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -2235,12 +2236,15 @@ func searchJSON(t *testing.T, query string) []searchHit {
 	t.Helper()
 	out, _ := runCLI(t, runOpts{sid: sidA}, "search", query, "--json")
 	var res struct {
-		Hits []searchHit `json:"hits"`
-		Mode string      `json:"mode"`
+		Hits         []searchHit `json:"hits"`
+		Mode         string      `json:"mode"`
+		ScoreScale   string      `json:"scoreScale"`
+		VectorStatus string      `json:"vectorStatus"`
 	}
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("search --json: %v\n%s", err, out)
 	}
+	searchScoreScale, searchMode, searchVectorStatus = res.ScoreScale, res.Mode, res.VectorStatus
 	return res.Hits
 }
 
@@ -2324,6 +2328,10 @@ func testFeedbackAndStats(t *testing.T) {
 
 func testPromptHook(t *testing.T) {
 	mustHaveSearchIndex(t)
+	// Auto-recall injects from hybrid replies only.
+	if searchJSON(t, "ping"); searchVectorStatus == "disabled" {
+		t.Skip("the server runs without an embedder: every reply is full text and auto-recall injects nothing")
+	}
 	ps := loadStateT(t, homeA).priv()
 	prompt := "Remind me what the " + phrase + " actually means for this project"
 	// Body scores climb while the index warms, so wait until the doc would
@@ -2372,26 +2380,44 @@ func testPromptHook(t *testing.T) {
 				"title": "Where the flombastic parser lives", "body": "The flombastic parser lives in pkg/flomb and panics on empty input.", "links": []string{}, "origin": "e2e"}},
 		},
 	}, nil)
-	travel := "What do I need to know about flombastic verbs and the flombastic parser before I touch them?"
-	waitFor(t, 30*time.Second, "the other project's memories to clear the recall gate", func() bool {
-		hits = searchJSON(t, travel)
-		found := 0
-		for _, h := range hits {
-			if h.Score >= ragMinScore && (h.RecordId == other+":flombastic-rule" || h.RecordId == other+":flombastic-parser") {
-				found++
+	// one prompt per memory: on the unit scale only the top hit clears the gate
+	clears := func(prompt, recordId string) {
+		waitFor(t, 30*time.Second, recordId+" to clear the recall gate", func() bool {
+			hits = searchJSON(t, prompt)
+			for _, h := range hits {
+				if h.Score >= ragMinScore() && h.RecordId == recordId {
+					return true
+				}
 			}
-		}
-		return found == 2
-	})
-	ctx := promptHook(t, sidP, travel)
-	mustContain(t, ctx, other+":flombastic-rule", "another project's feedback memory is recalled")
-	if strings.Contains(ctx, other+":flombastic-parser") {
+			return false
+		})
+	}
+	rulePrompt := "Which review do flombastic verbs always get before a merge?"
+	clears(rulePrompt, other+":flombastic-rule")
+	mustContain(t, promptHook(t, sidP, rulePrompt), other+":flombastic-rule", "another project's feedback memory is recalled")
+	parserPrompt := "Where does the flombastic parser live and what does it do on empty input?"
+	clears(parserPrompt, other+":flombastic-parser")
+	if ctx := promptHook(t, sidP, parserPrompt); strings.Contains(ctx, other+":flombastic-parser") {
 		t.Errorf("another project's project memory was recalled:\n%s", ctx)
 	}
 }
 
-// ragMinScore mirrors the hook's default gate (ANY_AGENTS_RAG_MIN).
-const ragMinScore = 0.030
+// searchScoreScale, searchMode and searchVectorStatus are the score
+// scale, the mode and the vector status of the last searchJSON reply.
+var searchScoreScale, searchMode, searchVectorStatus string
+
+// ragMinScore mirrors the hook's default gate for the last reply: its
+// floor on the reply's score scale (ANY_AGENTS_RAG_MIN), and no hit
+// passes a reply that is not hybrid.
+func ragMinScore() float64 {
+	switch {
+	case searchMode != "hybrid":
+		return math.Inf(1)
+	case searchScoreScale == "unit":
+		return 0.90
+	}
+	return 0.030
+}
 
 // recallWouldPick reports whether auto-recall would inject objectId's body:
 // the hit must clear the score gate and land in the first three hits of an
@@ -2399,7 +2425,7 @@ const ragMinScore = 0.030
 func recallWouldPick(sp *spaceState, hits []searchHit, objectId string) bool {
 	n := 0
 	for _, h := range hits {
-		if h.Score < ragMinScore {
+		if h.Score < ragMinScore() {
 			continue
 		}
 		if h.ObjectId == sp.owner("app") && h.Dataset == "editor_blocks" {

@@ -37,7 +37,7 @@ const usage = `any-agents — shared context for coding agents, backed by any sp
 
 Ids accept an object id or an any://o/<space>/<id> link; a link names its space.
 Aliases: save = doc add · prompt = task · scratch append|show = session note|show
-Env: ANY_AGENTS_ADDR (default: the running server recorded in ~/.any/*/server.addr, else 127.0.0.1:2046), ANY_AGENTS_SPACE (Agents), ANY_AGENTS_RAG_MIN (0.030), ANY_AGENTS_TOOL (claude), ANY_AGENTS_HOME (~/.any-agents)
+Env: ANY_AGENTS_ADDR (default: the running server recorded in ~/.any/*/server.addr, else 127.0.0.1:2046), ANY_AGENTS_SPACE (Agents), ANY_AGENTS_RAG_MIN (0.90, on the server's 0–1 hybrid score), ANY_AGENTS_TOOL (claude), ANY_AGENTS_HOME (~/.any-agents)
 `
 
 func main() {
