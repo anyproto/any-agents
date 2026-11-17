@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -39,6 +42,26 @@ func isCode(err error, code string) bool {
 	return ok && ae.Code == code
 }
 
+// transient reports whether err is the server being away rather than the
+// request being wrong: a network failure, a gateway status, or 401
+// auth.required while the app restarts and has not unlocked an account.
+// Any transport failure counts: *url.Error is a net.Error on every OS (the
+// syscall checks below are only belts; a refused dial on Windows is not
+// syscall.ECONNREFUSED, see golang/go#45621).
+func transient(err error) bool {
+	if err == nil {
+		return false
+	}
+	ae, ok := err.(*apiError)
+	if !ok {
+		var ne net.Error
+		return errors.As(err, &ne) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+			errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET)
+	}
+	return ae.Status == 502 || ae.Status == 503 || ae.Status == 504 ||
+		(ae.Status == 401 && ae.Code == "auth.required")
+}
+
 func (c *Client) do(method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -60,9 +83,14 @@ func (c *Client) do(method, path string, in, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	data, rerr := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		return decodeError(resp.StatusCode, data)
+	}
+	if rerr != nil {
+		// A body cut short (the server went away mid-response) is a
+		// transport error, not a malformed reply.
+		return rerr
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
