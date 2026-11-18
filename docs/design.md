@@ -243,12 +243,19 @@ Semantics
 - Chat cursor: one per collab and harness session. A message is new to
   a session unless that session wrote it, so the member's other
   sessions and every human (the account's own, steering from the app)
-  count as others. `join` keeps a session's cursor; a session that never
-  read the collab starts at the newest message on its first join, say
-  or wait and is told how many earlier messages `collab show` prints.
-- `wait` and `show` tag each chat line with the signer's short id
-  (`[A9FFFFFF]`): the member name and the agent label are free text,
-  the signer is not.
+  count as others. `join` keeps a session's cursor. A session without
+  one starts where this machine is (the newest cursor of any session
+  here) and keeps a copy of its own from its first join, say or wait; on
+  a machine that never read the collab it starts at the newest message
+  and is told how many earlier messages `collab show` prints.
+- `say` records a send before it goes out and its message id once the
+  server returns it, so a wait polling meanwhile, or after a send that
+  failed once the server took it, knows the session's own message.
+- `wait` and `show` tag each chat line with the signer's id
+  (`alice [A1aaaaaa]: …`): the member name and the agent label are free
+  text, the signer is not. Names lose brackets and newlines and a
+  message's further lines are indented, so free text cannot fake a line;
+  a short id that two identities in sight share is printed in full.
 - `--space <name>` resolves the private space first, then one collab
   space; two collab spaces with one name need the id.
 - `gc` deletes only unreferenced transcripts, never a human's attachment.

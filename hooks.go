@@ -284,7 +284,7 @@ func unreadCollabNotice(c *Client, st *State, sessionId string) string {
 			if !engaged(id, sessionId) {
 				continue // a sibling session of this member handles it
 			}
-			if n := newMessageCount(c, sp, id, sessionId, 10); n > 0 {
+			if n := newMessageCount(c, st, sp, id, sessionId, 10); n > 0 {
 				role := "helper"
 				if requester == st.me() {
 					role = "requester"
