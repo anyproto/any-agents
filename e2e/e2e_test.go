@@ -760,6 +760,9 @@ func testSessionStartHook(t *testing.T) {
 	mustContain(t, ctx, "shared context is on", "session-start context")
 	mustContain(t, ctx, "space "+spaceName, "session-start context names the space")
 	mustContain(t, ctx, fmt.Sprintf("project %q", scope), "session-start context")
+	if strings.Contains(ctx, "Your user's account is") {
+		t.Errorf("session-start context names the account without a collab space:\n%s", ctx)
+	}
 
 	row := sessionRow(t, ps, sidA)
 	sessionObjA, _ = row["id"].(string)
@@ -1569,10 +1572,74 @@ func testCollabSpace(t *testing.T) {
 		mustContain(t, apiMarkdown(t, sessionObjA), collabLink, "the private session notes the opened collab")
 		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "list", "--space", teamName, "--mine")
 		mustContain(t, out, "E2E Help Request", "collab list --mine")
+		// a human steers from the app (no agent envelope) before the join:
+		// joining keeps the session's cursor, so the message still arrives
+		humanSay := func(text string) {
+			apiPost(t, "/v1/spaces/"+teamId+"/objects/"+collabId+"/chat/messages", map[string]any{"text": text}, nil)
+		}
+		humanSay("from the human: before the join")
 		runCLI(t, runOpts{sid: sidA}, "collab", "join", collabLink)
+		out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "wait", collabLink, "--timeout", "30s")
+		mustContain(t, out, "from the human: before the join", "a human's message posted before the join reaches the session")
 		row = apiObject(t, collabId, teamId)
 		mustEqual(t, choiceOf(row, c, ts.prop("collab", "status")), "in_progress", "collab status after join")
 		mustEqualSlice(t, arrOf(row, c, ts.prop("collab", "assignees")), []string{"any://u/" + identity}, "collab assignees after join")
+
+		// another session of the same member counts as someone else: its
+		// message wakes a session's wait, the session's own does not, and
+		// one session's reads never hide a message from the other
+		sibling := "e2e-sibling-poster"
+		woke := make(chan string, 1)
+		go func() {
+			out, errOut, err := execCLI(runOpts{sid: sidA}, "collab", "wait", collabLink, "--timeout", "60s")
+			if err != nil {
+				out = fmt.Sprintf("wait failed: %v\n%s", err, errOut)
+			}
+			woke <- out
+		}()
+		time.Sleep(3 * time.Second)
+		_, errOut = runCLI(t, runOpts{sid: sibling}, "collab", "say", collabLink, "review request from a sibling session")
+		mustContain(t, errOut, "1 earlier message(s) are not shown here", "a first say names the messages the session never read")
+		select {
+		case out := <-woke:
+			mustContain(t, out, "review request from a sibling session", "collab wait wakes on a sibling session's message")
+		case <-time.After(70 * time.Second):
+			t.Fatal("collab wait did not wake on a sibling session's message")
+		}
+		runCLI(t, runOpts{sid: sidA}, "collab", "say", collabLink, "answer from session A")
+		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "wait", collabLink, "--timeout", "4s")
+		mustContain(t, errOut, "no reply within the timeout", "collab wait skips the session's own message")
+		mustEqual(t, stopHook(t, sidA, false), "", "stop hook after the session read everything but its own answer")
+		mustContain(t, stopHook(t, sibling, false), "E2E Help Request", "stop hook holds the sibling on the other session's answer")
+		out, _ = runCLI(t, runOpts{sid: sibling}, "collab", "wait", collabLink, "--timeout", "30s")
+		mustContain(t, out, "answer from session A", "the sibling's wait returns the answer the other session's wait skipped")
+		if strings.Contains(out, "review request from a sibling session") {
+			t.Errorf("the sibling's wait returned its own message:\n%s", out)
+		}
+		mustEqual(t, stopHook(t, sibling, false), "", "stop hook after the sibling read the answer")
+
+		// a human's message wakes every session of the member
+		steered := make(chan string, 2)
+		for _, sid := range []string{sidA, sibling} {
+			go func(sid string) {
+				out, errOut, err := execCLI(runOpts{sid: sid}, "collab", "wait", collabLink, "--timeout", "60s")
+				if err != nil {
+					out = fmt.Sprintf("wait failed: %v\n%s", err, errOut)
+				}
+				steered <- out
+			}(sid)
+		}
+		time.Sleep(3 * time.Second)
+		humanSay("from the human: look at the flaky test first")
+		for i := 0; i < 2; i++ {
+			select {
+			case out := <-steered:
+				mustContain(t, out, "["+identity[:8]+"]: from the human: look at the flaky test first", "every session's wait returns the human's message, tagged with its signer")
+			case <-time.After(70 * time.Second):
+				t.Fatal("a session's wait did not return the human's message")
+			}
+		}
+
 		_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "collab", "done", collabLink)
 		mustContain(t, errOut, "--met", "collab done without --met")
 		runCLI(t, runOpts{sid: sidA}, "collab", "done", collabLink, "--met", "the suite passed twice")
@@ -1603,6 +1670,7 @@ func testCollabSpace(t *testing.T) {
 	// the session-start hook re-checks the collab space and stays quiet
 	ctx := sessionStartHook(t, sidB, "resume")
 	mustContain(t, ctx, "shared context is on", "session-start context with a collab space")
+	mustContain(t, ctx, "Your user's account is ["+identity[:8]+"]", "session-start context names the user's account for collab chat tags")
 
 	// remove forgets the space on this machine; add adopts it again
 	_, errOut = runCLI(t, runOpts{sid: sidA, wantFail: true}, "space", "remove", spaceName)

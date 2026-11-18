@@ -18,8 +18,8 @@ import (
 // agent_collab in a collab space, whose body states the request and
 // whose chat is the thread. The requester's agent opens it; helpers'
 // agents join and talk; whoever finishes closes it. The bridge keeps its
-// own per-collab cursor on the chat (never the account's read state, so
-// the humans' unread badges stay intact).
+// own cursor on the chat per collab and session (never the account's
+// read state, so the humans' unread badges stay intact).
 
 var collabOpen = []string{"request", "in_progress"}
 
@@ -280,7 +280,7 @@ func collabOpenCmd(c *Client, st *State, args []string) {
 	if ci.sessionId != "" {
 		_ = c.MarkdownAppend(sp.st.private().Id, ci.sessionId, fmt.Sprintf("\nOpened collab [%s](%s) in %s.\n", name, globalLink(sp.Id, id), sp.Name))
 	}
-	saveCursor(id, "")
+	saveCursor(id, currentSessionId(), "")
 	markEngaged(id)
 	_ = renderStatusPage(c, sp)
 	if get("announce") == "true" {
@@ -345,7 +345,7 @@ func collabList(c *Client, st *State, args []string) {
 			}
 			id, _ := r["id"].(string)
 			fresh := ""
-			if n := newMessageCount(c, st, sp, id, 10); n > 0 {
+			if n := newMessageCount(c, sp, id, currentSessionId(), 10); n > 0 {
 				fresh = fmt.Sprintf(" +%d new", n)
 			}
 			fmt.Printf("%s  %-11s %-10s %-12s %s%s", globalLink(sp.Id, id), choiceOf(r, t, sp.prop("collab", "status")),
@@ -410,7 +410,7 @@ func collabShow(c *Client, st *State, sp *Space, id string, n int) {
 	}
 	printMessages(msgs, members)
 	if len(msgs) > 0 {
-		saveCursor(id, lastVer(msgs))
+		saveCursor(id, currentSessionId(), lastVer(msgs))
 	}
 }
 
@@ -429,23 +429,31 @@ func collabJoin(c *Client, st *State, sp *Space, id string) error {
 	if err := c.SetProperties(sp.Id, id, t, props(sp, "collab", pp)); err != nil {
 		return err
 	}
-	// On the first join everything before it counts as read: wait returns
-	// only what follows. A repeated join keeps the cursor.
-	if !contains(cur, st.me()) {
-		if msgs, err := chatTail(c, sp, id, 1); err == nil && len(msgs) > 0 {
-			saveCursor(id, maxVerOf(msgs[0]))
-		}
+	// A session that read the collab keeps its cursor, so nothing posted
+	// since `collab show` is lost; one that never read it starts here.
+	if sid := currentSessionId(); !hasCursor(id, sid) {
+		_ = seedCursor(c, sp, id, sid)
 	}
 	fmt.Printf("%s  joined\n", globalLink(sp.Id, id))
 	return nil
 }
 
-// collabSay posts one message as this account's agent. The cursor stays:
-// others' messages that arrived before this one are still unseen, and
-// wait skips own messages anyway.
+// collabSay posts one message as this account's agent and records it as
+// this session's. The cursor stays: others' messages that arrived before
+// this one are still unseen, and wait skips the session's own messages.
+// A session's first word in a collab it never read starts its cursor
+// here, so a reply that lands before its wait starts is still caught.
 func collabSay(c *Client, st *State, sp *Space, id, text string) error {
-	if _, err := c.ChatSend(sp.Id, id, text, agentEnvelope(c, st, sp)); err != nil {
+	sid := currentSessionId()
+	if !hasCursor(id, sid) {
+		_ = seedCursor(c, sp, id, sid)
+	}
+	res, err := c.ChatSend(sp.Id, id, text, agentEnvelope(c, st, sp))
+	if err != nil {
 		return err
+	}
+	if len(res.RecordIds) > 0 {
+		recordPosted(id, sid, res.RecordIds[0])
 	}
 	fmt.Printf("%s  sent\n", globalLink(sp.Id, id))
 	return nil
@@ -597,10 +605,12 @@ func rediscoverAddr(st *State) string {
 	return ""
 }
 
-// collabWait polls the chat until a message newer than the cursor
-// arrives (by default one that is not mine), or the timeout passes.
+// collabWait polls the chat until a message newer than the session's
+// cursor arrives (by default one this session did not write: the
+// member's other sessions count as others), or the timeout passes.
 func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duration, all bool) ([]map[string]any, string, error) {
 	deadline := time.Now().Add(timeout)
+	sid := currentSessionId()
 	closed := func(c *Client) string {
 		row, err := c.GetObject(sp.Id, id)
 		if err != nil {
@@ -612,11 +622,11 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		}
 		return ""
 	}
-	// No cursor on this machine: the backlog is `collab show`'s job; wait
-	// starts from now. A collab opened here has an empty cursor and every
+	// No cursor for this session: the backlog is `collab show`'s job; wait
+	// starts from now and names what it skipped. A collab opened here has an empty cursor and every
 	// reply counts. Taken inside the loop so a server that is down at the
 	// start is waited out instead of recording an empty cursor.
-	_, haveCursor := loadCursor(id)
+	haveCursor := hasCursor(id, sid)
 	var cursor string
 	cursorRead := false
 	// A restarting server (network error, 502-504, 401 auth.required) is
@@ -677,8 +687,7 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 		pc := *c
 		pc.hc = &http.Client{Transport: c.hc.Transport, Timeout: pollFor}
 		if !haveCursor {
-			msgs, err := chatTail(&pc, sp, id, 1)
-			if err != nil {
+			if err := seedCursor(&pc, sp, id, sid); err != nil {
 				retry, derr := fail(err)
 				if !retry {
 					return nil, "", err
@@ -688,17 +697,12 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 				}
 				continue
 			}
-			if len(msgs) > 0 {
-				saveCursor(id, maxVerOf(msgs[0]))
-			} else {
-				saveCursor(id, "")
-			}
 			haveCursor = true
 		}
 		if !cursorRead {
-			// Read once: a sibling waiter of the same member that advances
-			// the shared cursor must not hide the message from this one.
-			cursor, _ = loadCursor(id)
+			// Read once: another wait of this session that advances the
+			// cursor must not hide the message from this one.
+			cursor, _ = loadCursor(id, sid)
 			cursorRead = true
 		}
 		msgs, err := chatSince(&pc, sp, id, cursor, 50)
@@ -733,16 +737,17 @@ func collabWait(c *Client, st *State, sp *Space, id string, timeout time.Duratio
 			delay = 2 * time.Second
 			continue
 		}
+		posted := postedBy(id, sid)
 		var out []map[string]any
 		for _, m := range msgs {
-			if all || !ownAgentMessage(m, st) {
+			if all || !posted[msgIdOf(m)] {
 				out = append(out, m)
 			}
 		}
 		if len(msgs) > 0 {
 			cursor = lastVer(msgs)
-			if saved, _ := loadCursor(id); cursor > saved {
-				saveCursor(id, cursor)
+			if saved, _ := loadCursor(id, sid); cursor > saved {
+				saveCursor(id, sid, cursor)
 			}
 		}
 		if len(out) > 0 {
@@ -800,7 +805,7 @@ func collabDigest(c *Client, st *State, sessionId string) string {
 				requests = append(requests, fmt.Sprintf("%q %s", nameOf(r), globalLink(sp.Id, id)))
 			}
 			if mine && len(fresh)+len(replies) < 10 {
-				if n := newMessageCount(c, st, sp, id, 10); n > 0 {
+				if n := newMessageCount(c, sp, id, sessionId, 10); n > 0 {
 					item := fmt.Sprintf("%q +%d %s", nameOf(r), n, globalLink(sp.Id, id))
 					if requester == st.me() {
 						if dod := strOf(r, t, sp.prop("collab", "doneWhen")); dod != "" {
@@ -832,32 +837,27 @@ func collabDigest(c *Client, st *State, sessionId string) string {
 	return b.String()
 }
 
-// newMessageCount counts messages after the cursor that are not mine
-// (capped at limit).
-func newMessageCount(c *Client, st *State, sp *Space, id string, limit int) int {
-	cursor, _ := loadCursor(id)
+// newMessageCount counts the messages after the session's cursor that it
+// did not write itself (capped at limit).
+func newMessageCount(c *Client, sp *Space, id, sid string, limit int) int {
+	cursor, _ := loadCursor(id, sid)
 	msgs, err := chatSince(c, sp, id, cursor, limit)
 	if err != nil {
 		return 0
 	}
+	posted := postedBy(id, sid)
 	n := 0
 	for _, m := range msgs {
-		if !ownAgentMessage(m, st) {
+		if !posted[msgIdOf(m)] {
 			n++
 		}
 	}
 	return n
 }
 
-// ownAgentMessage is a message this machine's agent (or another of the
-// account's agents) wrote: own identity with the agent envelope. The
-// account's human typing from a phone has no envelope and counts as new.
-func ownAgentMessage(m map[string]any, st *State) bool {
-	if creatorOf(m) != st.Identity {
-		return false
-	}
-	_, agent := m["agent"].(map[string]any)
-	return agent
+func msgIdOf(m map[string]any) string {
+	s, _ := m["id"].(string)
+	return s
 }
 
 // --- chat reads ---
@@ -898,17 +898,21 @@ func creatorOf(m map[string]any) string {
 	return s
 }
 
+// printMessages tags each line with the signer's short id: the member
+// name and the agent label are free text anyone can set, the signer is
+// not.
 func printMessages(msgs []map[string]any, members map[string]string) {
 	for _, m := range msgs {
 		who := members[creatorOf(m)]
-		if who == "" {
-			who = shortId(creatorOf(m))
-		}
 		if a, ok := m["agent"].(map[string]any); ok {
 			if n, _ := a["name"].(string); n != "" {
 				who = n
 			}
 		}
+		if who != "" {
+			who += " "
+		}
+		who += "[" + shortId(creatorOf(m)) + "]"
 		text, _ := m["text"].(string)
 		at := time.Unix(int64(recordFloat(m, "createdAt")), 0).Format("01-02 15:04")
 		if maxVerOf(m) != verOf(m) {
@@ -1005,30 +1009,126 @@ func contains(list []string, s string) bool {
 
 // --- cursors ---
 
-func cursorPath(objectId string) string {
-	return filepath.Join(stateDir(), "collab", objectId+".json")
+// Each harness session keeps its own cursor per collab, so one session
+// reading a collab never hides a message from another. A call outside a
+// session uses the collab's plain cursor, which is also where a session
+// without a cursor of its own starts.
+func cursorPath(objectId, sid string) string {
+	name := objectId
+	if sid != "" {
+		name += "." + fileSafe(sid)
+	}
+	return filepath.Join(stateDir(), "collab", name+".json")
 }
 
-// loadCursor returns the last seen message version and whether this
-// machine has a cursor at all: an empty cursor that exists means
+// loadCursor returns the last message version the session saw and
+// whether a cursor exists at all: an empty cursor that exists means
 // "nothing seen yet" (the collab was just opened here), no cursor means
-// another machine's collab.
-func loadCursor(objectId string) (string, bool) {
-	var cur struct {
-		Last string `json:"last"`
+// a collab this machine never read.
+func loadCursor(objectId, sid string) (string, bool) {
+	paths := []string{cursorPath(objectId, sid)}
+	if sid != "" {
+		paths = append(paths, cursorPath(objectId, ""))
 	}
-	b, err := os.ReadFile(cursorPath(objectId))
-	if err != nil {
-		return "", false
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var cur struct {
+			Last string `json:"last"`
+		}
+		_ = json.Unmarshal(b, &cur)
+		return cur.Last, true
 	}
-	_ = json.Unmarshal(b, &cur)
-	return cur.Last, true
+	return "", false
 }
 
-func saveCursor(objectId, last string) {
-	_ = os.MkdirAll(filepath.Dir(cursorPath(objectId)), 0o755)
+func hasCursor(objectId, sid string) bool {
+	_, ok := loadCursor(objectId, sid)
+	return ok
+}
+
+// seedCursor starts the cursor of a session that never read the collab
+// at the chat's newest message. Every message counts for the agent (its
+// user may be steering it from the app), so the skipped ones are named
+// with the command that prints them.
+func seedCursor(c *Client, sp *Space, id, sid string) error {
+	msgs, err := chatTail(c, sp, id, 50)
+	if err != nil {
+		return err
+	}
+	saveCursor(id, sid, lastVer(msgs))
+	posted := postedBy(id, sid)
+	n := 0
+	for _, m := range msgs {
+		if !posted[msgIdOf(m)] {
+			n++
+		}
+	}
+	if n > 0 {
+		count := fmt.Sprint(n)
+		if len(msgs) == 50 {
+			count += "+"
+		}
+		fmt.Fprintf(os.Stderr, "any-agents: this session had not read this collab: %s earlier message(s) are not shown here — `any-agents collab show %s` prints them\n", count, globalLink(sp.Id, id))
+	}
+	return nil
+}
+
+// saveCursor writes through a rename: a background wait and a foreground
+// show of one session never read a half-written cursor.
+func saveCursor(objectId, sid, last string) {
+	p := cursorPath(objectId, sid)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	b, _ := json.Marshal(map[string]string{"last": last})
-	_ = os.WriteFile(cursorPath(objectId), b, 0o644)
+	tmp := fmt.Sprintf("%s.%d.tmp", p, os.Getpid())
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		_ = os.Rename(tmp, p)
+	}
+}
+
+// Posted messages: the ids of the messages each session wrote, one
+// "<session>\t<message id>" line each. The chat's agent envelope names
+// the account, not the session, so this is how a session tells its own
+// messages from those of the member's other sessions.
+func postedPath(objectId string) string {
+	return filepath.Join(stateDir(), "collab", objectId+".posted")
+}
+
+func recordPosted(objectId, sid, msgId string) {
+	_ = os.MkdirAll(filepath.Dir(postedPath(objectId)), 0o755)
+	f, err := os.OpenFile(postedPath(objectId), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(sid + "\t" + msgId + "\n")
+	_ = f.Close()
+}
+
+// postedBy is the set of message ids the session wrote in the collab.
+func postedBy(objectId, sid string) map[string]bool {
+	out := map[string]bool{}
+	b, err := os.ReadFile(postedPath(objectId))
+	if err != nil {
+		return out
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if s, msgId, ok := strings.Cut(l, "\t"); ok && s == sid && msgId != "" {
+			out[msgId] = true
+		}
+	}
+	return out
+}
+
+// fileSafe keeps a session id usable as part of a file name.
+func fileSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return r
+		}
+		return '_'
+	}, s)
 }
 
 // Engagement: the harness sessions of this member that took part in a

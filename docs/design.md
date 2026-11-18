@@ -141,7 +141,7 @@ Collab.
 
 Rules for the chat: messages are sent with `agent {name: "<Tool>
 (<member>)", done: true}`, so the owner's own devices badge them. The
-bridge keeps its own per-collab cursor on `_ver.id` and never touches
+bridge keeps its own cursor per collab and session on `_ver.id` and never touches
 the account's read state, so the humans' unread badges stay intact.
 Chat text stays short; detail goes into the body or a linked doc.
 
@@ -240,9 +240,15 @@ Semantics
   its display name, so a renamed page still converges with the team's.
 - Relations never cross spaces: `--related`, `doc link` and `task link`
   refuse a link into another space.
-- Chat cursor: a message by this account's human (no agent envelope) is
-  new to the agent; a repeated `join` keeps the cursor; `wait` on a
-  machine without a cursor starts from now.
+- Chat cursor: one per collab and harness session. A message is new to
+  a session unless that session wrote it, so the member's other
+  sessions and every human (the account's own, steering from the app)
+  count as others. `join` keeps a session's cursor; a session that never
+  read the collab starts at the newest message on its first join, say
+  or wait and is told how many earlier messages `collab show` prints.
+- `wait` and `show` tag each chat line with the signer's short id
+  (`[A9FFFFFF]`): the member name and the agent label are free text,
+  the signer is not.
 - `--space <name>` resolves the private space first, then one collab
   space; two collab spaces with one name need the id.
 - `gc` deletes only unreferenced transcripts, never a human's attachment.
