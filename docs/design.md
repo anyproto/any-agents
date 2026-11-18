@@ -250,7 +250,10 @@ Semantics
   and is told how many earlier messages `collab show` prints.
 - `say` records a send before it goes out and its message id once the
   server returns it, so a wait polling meanwhile, or after a send that
-  failed once the server took it, knows the session's own message.
+  failed once the server took it, knows the session's own message; an
+  unrecorded send matches only messages from the minutes after it.
+- A member who already agreed to close posts no second vote, so the
+  member's other sessions are not woken by a repeat.
 - `wait` and `show` tag each chat line with the signer's id
   (`alice [A1aaaaaa]: …`): the member name and the agent label are free
   text, the signer is not. Names lose brackets and newlines and a

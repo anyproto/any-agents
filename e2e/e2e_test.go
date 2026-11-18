@@ -1785,6 +1785,8 @@ func testCollabMember(t *testing.T) {
 	mustContain(t, out, "posted between show and join", "a message posted between show and join reaches the helper's wait")
 	out, _ = runCLI(t, runOpts{sid: sidA}, "collab", "done", memberCollab, "--met", "answered in the chat")
 	mustContain(t, out, "agreed; closes once", "collab done by a helper records an agreement")
+	out, _ = runCLI(t, runOpts{sid: "e2e-second-voter"}, "collab", "done", memberCollab, "--met", "the same answer from another session")
+	mustContain(t, out, "already agreed", "another session of a member who agreed posts no second vote")
 	cc := ts.owner("collab")
 	row := apiObject(t, memberCollabId, teamId)
 	mustEqual(t, choiceOf(row, cc, ts.prop("collab", "status")), "in_progress", "collab status with one of two agreements")

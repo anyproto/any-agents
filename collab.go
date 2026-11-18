@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // A collab is a help request between agents: one object of type
@@ -428,13 +430,13 @@ func collabJoin(c *Client, st *State, sp *Space, id string) error {
 	if choiceOf(row, t, sp.prop("collab", "status")) == "request" {
 		pp["status"] = []string{"in_progress"}
 	}
-	if err := c.SetProperties(sp.Id, id, t, props(sp, "collab", pp)); err != nil {
-		return err
-	}
 	// A session that read the collab keeps its cursor, so nothing posted
 	// since `collab show` is lost; on a machine that never read it the
-	// cursor starts here.
+	// cursor starts here. Taken first: a failed read leaves no half join.
 	if err := ensureCursor(c, st, sp, id, currentSessionId()); err != nil {
+		return err
+	}
+	if err := c.SetProperties(sp.Id, id, t, props(sp, "collab", pp)); err != nil {
 		return err
 	}
 	fmt.Printf("%s  joined\n", globalLink(sp.Id, id))
@@ -454,7 +456,7 @@ func collabSay(c *Client, st *State, sp *Space, id, text string) error {
 		return err
 	}
 	key := textKey(text)
-	recordPosted(id, sid, key)
+	recordPosted(id, sid, key, strconv.FormatInt(time.Now().Unix(), 10))
 	res, err := c.ChatSend(sp.Id, id, text, agentEnvelope(c, st, sp))
 	if err != nil {
 		return err
@@ -506,7 +508,16 @@ func collabClose(c *Client, st *State, sp *Space, id, verb, met, user string) er
 	if !contains(parties, st.me()) {
 		return fmt.Errorf("you are not part of this collab: `collab join %s` first — or --user \"<their words>\" when your user decided to close it", link)
 	}
-	agreed := addToLinks(membersOf(row, t, sp.prop("collab", "agreed")), st.me())
+	prior := membersOf(row, t, sp.prop("collab", "agreed"))
+	if contains(prior, st.me()) {
+		// Another session of this member (or an earlier vote) agreed: a
+		// second vote message would only wake the member's other sessions.
+		if waiting := collabWaiting(sp, row, prior); len(waiting) > 0 {
+			fmt.Printf("%s  already agreed; closes once %s agreed too\n", link, strings.Join(memberNames(memberIndex(c, sp), waiting), ", "))
+			return nil
+		}
+	}
+	agreed := addToLinks(prior, st.me())
 	waiting := collabWaiting(sp, row, agreed)
 	text := label + ": " + met
 	if len(waiting) > 0 {
@@ -847,11 +858,13 @@ func collabDigest(c *Client, st *State, sessionId string) string {
 // did not write itself (capped at limit).
 func newMessageCount(c *Client, st *State, sp *Space, id, sid string, limit int) int {
 	cursor, _ := loadCursor(id, sid)
-	msgs, err := chatSince(c, sp, id, cursor, limit)
+	// Read past the session's own messages: a run of them must not hide a
+	// reply behind the limit.
+	msgs, err := chatSince(c, sp, id, cursor, 200)
 	if err != nil {
 		return 0
 	}
-	return len(unseen(msgs, ownPostsOf(id, sid), st.Identity))
+	return min(len(unseen(msgs, ownPostsOf(id, sid), st.Identity)), limit)
 }
 
 func msgIdOf(m map[string]any) string {
@@ -920,18 +933,19 @@ func printMessages(msgs []map[string]any, members map[string]string, me string) 
 		return "[" + shortId(id) + "]"
 	}
 	for _, m := range msgs {
-		who := members[creatorOf(m)]
+		who := plainName(members[creatorOf(m)])
 		if a, ok := m["agent"].(map[string]any); ok {
-			if n, _ := a["name"].(string); n != "" {
-				who = n
+			n, _ := a["name"].(string)
+			if who = plainName(n); who == "" {
+				who = "agent" // never printed like the member typing
 			}
 		}
-		if who = plainName(who); who != "" {
+		if who != "" {
 			who += " "
 		}
 		who += tag(creatorOf(m))
 		text, _ := m["text"].(string)
-		text = strings.ReplaceAll(strings.TrimSpace(text), "\r", "")
+		text = plainText(text)
 		at := time.Unix(int64(recordFloat(m, "createdAt")), 0).Format("01-02 15:04")
 		if maxVerOf(m) != verOf(m) {
 			at += ", edited"
@@ -940,19 +954,38 @@ func printMessages(msgs []map[string]any, members map[string]string, me string) 
 	}
 }
 
-// plainName keeps a free-text name on one line and out of the tag's
-// brackets.
+// plainName keeps a free-text name on one line and clear of the tag's
+// brackets and the line's colon.
 func plainName(s string) string {
 	s = strings.Map(func(r rune) rune {
 		switch {
-		case r == '[' || r == ']':
+		case r == '[' || r == ']' || r == ':':
 			return -1
-		case r < ' ' || r == 0x7f:
+		case unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r):
 			return ' '
 		}
 		return r
 	}, s)
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// plainText turns every line break (\r, \v, \f, NEL, U+2028/9) into \n
+// and drops other control and format runes (terminal escapes, bidi
+// overrides), so a message cannot draw a line of its own.
+func plainText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r == '\r' || r == '\v' || r == '\f' || r == 0x85 || r == 0x2028 || r == 0x2029:
+			return '\n'
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(s)
 }
 
 // agentEnvelope marks a chat message as written by this account's agent;
@@ -1133,8 +1166,8 @@ func saveCursor(objectId, sid, last string) {
 }
 
 // Posted messages: what each session wrote, one tab-separated line per
-// event — "<session> #<text key>" before a send, "<session> <message id>
-// #<text key>" once the server returned the id. The chat's agent envelope
+// event — "<session> #<text key> <unix time>" before a send, "<session>
+// <message id> #<text key>" once the server returned the id. The chat's agent envelope
 // names the account, not the session, so this is how a session tells its
 // own messages from those of the member's other sessions.
 func postedPath(objectId string) string {
@@ -1142,13 +1175,7 @@ func postedPath(objectId string) string {
 }
 
 func recordPosted(objectId, sid string, fields ...string) {
-	_ = os.MkdirAll(filepath.Dir(postedPath(objectId)), 0o755)
-	f, err := os.OpenFile(postedPath(objectId), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	_, _ = f.WriteString(strings.Join(append([]string{sid}, fields...), "\t") + "\n")
-	_ = f.Close()
+	appendLine(postedPath(objectId), strings.Join(append([]string{sid}, fields...), "\t"))
 }
 
 // textKey identifies a message by its text while its id is unknown.
@@ -1158,31 +1185,42 @@ func textKey(text string) string {
 }
 
 // ownPosts is what one session wrote in a collab: message ids, and the
-// text keys of sends whose id is not recorded (in flight, or a send that
-// failed after the server took it).
+// text keys and times of sends whose id is not recorded (in flight, or a
+// send that failed, maybe after the server took it).
 type ownPosts struct {
 	ids     map[string]bool
-	pending map[string]int
+	pending map[string][]int64
 }
 
+// pendingWindow bounds how long after an unrecorded send a message of
+// the same text counts as that send: a send that never landed must not
+// hide a later message for good.
+const pendingWindow = 5 * 60
+
+// ownPostsOf reads the session's posts; outside a session (no id) every
+// post of this machine's sessions counts as own.
 func ownPostsOf(objectId, sid string) ownPosts {
-	o := ownPosts{ids: map[string]bool{}, pending: map[string]int{}}
+	o := ownPosts{ids: map[string]bool{}, pending: map[string][]int64{}}
 	b, err := os.ReadFile(postedPath(objectId))
 	if err != nil {
 		return o
 	}
 	for _, l := range strings.Split(string(b), "\n") {
 		f := strings.Split(l, "\t")
-		if len(f) < 2 || f[0] != sid {
+		if len(f) < 2 || sid != "" && f[0] != sid {
 			continue
 		}
 		switch {
 		case strings.HasPrefix(f[1], "#"):
-			o.pending[f[1]]++
+			var at int64
+			if len(f) > 2 {
+				at, _ = strconv.ParseInt(f[2], 10, 64)
+			}
+			o.pending[f[1]] = append(o.pending[f[1]], at)
 		default:
 			o.ids[f[1]] = true
-			if len(f) > 2 {
-				o.pending[f[2]]--
+			if len(f) > 2 && len(o.pending[f[2]]) > 0 {
+				o.pending[f[2]] = o.pending[f[2]][1:]
 			}
 		}
 	}
@@ -1190,8 +1228,8 @@ func ownPostsOf(objectId, sid string) ownPosts {
 }
 
 // wrote reports whether the session wrote m: by id, or for a send still
-// unrecorded by its text, which only an agent message of this account
-// can match.
+// unrecorded by its text and time, which only an agent message of this
+// account can match.
 func (o ownPosts) wrote(m map[string]any, identity string) bool {
 	if o.ids[msgIdOf(m)] {
 		return true
@@ -1203,7 +1241,13 @@ func (o ownPosts) wrote(m map[string]any, identity string) bool {
 		return false
 	}
 	text, _ := m["text"].(string)
-	return o.pending[textKey(text)] > 0
+	created := int64(recordFloat(m, "createdAt"))
+	for _, at := range o.pending[textKey(text)] {
+		if created >= at-30 && created <= at+pendingWindow {
+			return true
+		}
+	}
+	return false
 }
 
 // unseen drops the messages the session wrote itself.
@@ -1240,12 +1284,18 @@ func markEngaged(objectId string) {
 	if sid == "" || engaged(objectId, sid) {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(engagedPath(objectId)), 0o755)
-	f, err := os.OpenFile(engagedPath(objectId), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	appendLine(engagedPath(objectId), sid)
+}
+
+// appendLine adds one line to a state file (O_APPEND: safe across
+// concurrent calls).
+func appendLine(path, line string) {
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
-	_, _ = f.WriteString(sid + "\n")
+	_, _ = f.WriteString(line + "\n")
 	_ = f.Close()
 }
 
