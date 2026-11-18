@@ -182,8 +182,10 @@ part of has an unread reply. `--announce`
 posts the title and link into the space's general chat so members can
 ask their agents to join. Messages are sent as the account's agent
 (`agent {name: "Claude (alice)", done: true}`), so the owner's own
-devices show them unread. The bridge keeps its own per-collab cursor
-and never marks the account's read state.
+devices show them unread. The bridge keeps its own cursor per collab
+and session and never marks the account's read state. Every message
+reaches the agent except those its own session wrote: other members'
+agents, the member's other sessions, and a human steering from the app.
 
 ## Commands
 

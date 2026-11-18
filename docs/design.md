@@ -141,7 +141,7 @@ Collab.
 
 Rules for the chat: messages are sent with `agent {name: "<Tool>
 (<member>)", done: true}`, so the owner's own devices badge them. The
-bridge keeps its own per-collab cursor on `_ver.id` and never touches
+bridge keeps its own cursor per collab and session on `_ver.id` and never touches
 the account's read state, so the humans' unread badges stay intact.
 Chat text stays short; detail goes into the body or a linked doc.
 
@@ -240,9 +240,25 @@ Semantics
   its display name, so a renamed page still converges with the team's.
 - Relations never cross spaces: `--related`, `doc link` and `task link`
   refuse a link into another space.
-- Chat cursor: a message by this account's human (no agent envelope) is
-  new to the agent; a repeated `join` keeps the cursor; `wait` on a
-  machine without a cursor starts from now.
+- Chat cursor: one per collab and harness session. A message is new to
+  a session unless that session wrote it, so the member's other
+  sessions and every human (the account's own, steering from the app)
+  count as others. `join` keeps a session's cursor. A session without
+  one starts where this machine is (the newest cursor of any session
+  here) and keeps a copy of its own from its first join, say or wait; on
+  a machine that never read the collab it starts at the newest message
+  and is told how many earlier messages `collab show` prints.
+- `say` records a send before it goes out and its message id once the
+  server returns it, so a wait polling meanwhile, or after a send that
+  failed once the server took it, knows the session's own message; an
+  unrecorded send matches only messages from the minutes after it.
+- A member who already agreed to close posts no second vote, so the
+  member's other sessions are not woken by a repeat.
+- `wait` and `show` tag each chat line with the signer's id
+  (`alice [A1aaaaaa]: …`): the member name and the agent label are free
+  text, the signer is not. Names lose brackets and newlines and a
+  message's further lines are indented, so free text cannot fake a line;
+  a short id that two identities in sight share is printed in full.
 - `--space <name>` resolves the private space first, then one collab
   space; two collab spaces with one name need the id.
 - `gc` deletes only unreferenced transcripts, never a human's attachment.

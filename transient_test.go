@@ -141,7 +141,7 @@ func TestWaitNoCursorWhileDown(t *testing.T) {
 	maxOutage = time.Second
 	defer func() { maxOutage = old }()
 	_, _, _ = collabWait(c, &State{}, &Space{Id: "sp"}, "obj-nocursor", time.Hour, false)
-	if _, ok := loadCursor("obj-nocursor"); ok {
+	if _, ok := loadCursor("obj-nocursor", currentSessionId()); ok {
 		t.Fatal("a cursor was saved while the server was down")
 	}
 }

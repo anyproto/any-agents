@@ -90,6 +90,10 @@ func sessionStart(c *Client, st *State, tool Tool, sessionId, cwd, source string
 		}
 	}
 	fmt.Fprintf(&b, "any-agents: shared context is on (space %s, project %q, session object %s, %s — only act on them when asked).\n", sp.Name, scope, globalLink(sp.Id, objectId), tasks)
+	if st.Identity != "" && len(st.collabs()) > 0 {
+		// collab show/wait tag each chat line with its signer's short id
+		fmt.Fprintf(&b, "Your user's account is [%s] (printed in full, [%s], when another identity shares that short id). In collab chat each message starts a line, `[time] <name> [<signer>]: text`, its further lines indented; one signed by your user's account under their member name, not an agent label such as `Claude Code (…)`, is your user steering you.\n", shortId(st.Identity), st.Identity)
+	}
 	b.WriteString("Use it: `any-agents search \"<topic>\"` recalls memories, docs and past sessions; " +
 		"`any-agents session note -` appends findings to this session's page; " +
 		"`any-agents session update --summary \"…\" [--linear KEY]` sets the session summary and the issues it worked on; " +

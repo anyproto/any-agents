@@ -261,7 +261,7 @@ func hookPrompt(tool Tool) {
 }
 
 // unreadCollabNotice names the open collabs I am part of that have
-// messages this machine has not read, or "". It nags on every prompt
+// messages this session has not read, or "". It nags on every prompt
 // until `collab show` or `collab wait` advances the cursor.
 func unreadCollabNotice(c *Client, st *State, sessionId string) string {
 	var items []string
@@ -284,7 +284,7 @@ func unreadCollabNotice(c *Client, st *State, sessionId string) string {
 			if !engaged(id, sessionId) {
 				continue // a sibling session of this member handles it
 			}
-			if n := newMessageCount(c, st, sp, id, 10); n > 0 {
+			if n := newMessageCount(c, st, sp, id, sessionId, 10); n > 0 {
 				role := "helper"
 				if requester == st.me() {
 					role = "requester"
