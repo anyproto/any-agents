@@ -1,27 +1,21 @@
 package main
 
-// The space schema: nine client bundles (ids are permanent per space; a
-// shape change takes a new /vN id). Two declare a type — the app root,
-// which hosts the records datasets, and Collab, which needs a chat next
-// to its body; seven declare a collection: their objects are built-in
-// `page`s filed under them, so a human creating a row in any client gets
-// the right thing. Descriptors follow any's docs/27-descriptors.md; every
-// property carries xFormat.pos so columns render in declaration order.
+import (
+	"bytes"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/canonical/go-cnf/cnfjson"
+)
+
+// The space schema lives in schema.cnf; this file loads, checks and
+// expands it into the bundle ensure requests.
 
 const (
 	version      = "0.4.10"
 	setupVersion = 8 // bump to force a full re-ensure on every machine
-
-	bundleApp     = "agents/v1"
-	bundleProject = "agents-project/v1"
-	bundleMachine = "agents-machine/v1"
-	bundleSession = "agents-session/v1"
-	bundleDoc     = "agents-doc/v1"
-	bundleTask    = "agents-task/v1"
-	bundlePlan    = "agents-plan/v1"
-	bundleLinear  = "agents-linear/v1"
-	bundleCollab  = "agents-collab/v1"
-	bundleRelease = "agents-release/v1"
 
 	// pageType is any's built-in document type every collection member has.
 	pageType = "page"
@@ -33,24 +27,26 @@ const (
 	dsFeedback = "feedback"
 )
 
-// bundleNames are the state keys, in install order (targets before the
-// definitions that reference them by xKey).
-var bundleNames = []string{"app", "project", "machine", "session", "linear", "release", "doc", "task", "plan", "collab"}
+//go:embed schema.cnf
+var schemaSrc []byte
 
-var bundleIds = map[string]string{
-	"app": bundleApp, "project": bundleProject, "machine": bundleMachine, "session": bundleSession,
-	"doc": bundleDoc, "task": bundleTask, "plan": bundlePlan, "linear": bundleLinear, "collab": bundleCollab, "release": bundleRelease,
-}
+// schema is schema.cnf, parsed and checked. A bad edit panics at start;
+// TestSchema loads the file, so `go test` reports it first.
+var schema = mustLoadSchema(schemaSrc)
 
-// collectionBundles declare a collection instead of a type: their
-// objects are pages filed under them.
-var collectionBundles = map[string]bool{"release": true,
-	"project": true, "machine": true, "session": true, "linear": true, "doc": true, "task": true, "plan": true,
-}
-
-// optionalBundles may be absent in a space: collab needs a server that
-// lets a client type declare the chat module.
-var optionalBundles = map[string]bool{"collab": true}
+var (
+	// bundleNames are the state keys, in install order.
+	bundleNames = schema.names
+	bundleIds   = schema.ids
+	bundleApp   = bundleIds["app"]
+	// collectionBundles declare a collection instead of a type: their
+	// objects are pages filed under them.
+	collectionBundles = schema.collections
+	// optionalBundles may be absent in a space: collab needs a server that
+	// lets a client type declare the chat module.
+	optionalBundles = schema.optional
+	typeIcons       = schema.icons
+)
 
 var defaultSpaceName = "Agents"
 
@@ -61,101 +57,291 @@ func spaceName() string {
 	return defaultSpaceName
 }
 
-// --- descriptor helpers ---
+// --- schema.cnf shape ---
 
-type opt struct{ key, name, color string }
-
-func prop(xkey, name, kind, slug, pos string) PropertyDraft {
-	return PropertyDraft{XKey: xkey, Name: name, Kind: kind, XFormat: map[string]any{"type": slug, "pos": pos}}
+type schemaFile struct {
+	names       []string
+	ids         map[string]string
+	collections map[string]bool
+	optional    map[string]bool
+	icons       map[string][2]string
+	bundles     map[string]*bundleSpec
 }
 
-func text(xkey, name, pos string) PropertyDraft { return prop(xkey, name, "string", "text", pos) }
-func longtext(xkey, name, pos string) PropertyDraft {
-	return prop(xkey, name, "string", "longtext", pos)
+type bundleSpec struct {
+	Key             string                             `json:"key"`
+	Id              string                             `json:"id"`
+	Name            string                             `json:"name"`
+	XKey            string                             `json:"xKey"`
+	Hidden          bool                               `json:"hidden"`
+	Collection      bool                               `json:"collection"`
+	Optional        bool                               `json:"optional"`
+	Layout          map[string]any                     `json:"layout"`
+	Icon            iconSpec                           `json:"icon"`
+	RootCollections []string                           `json:"rootCollections"`
+	RootProperties  map[string]any                     `json:"rootProperties"`
+	Parts           []string                           `json:"parts"`
+	Records         []recordSpec                       `json:"records"`
+	Properties      []map[string]propSpec              `json:"properties"`
+	Choices         map[string][]map[string]optionSpec `json:"choices"`
 }
-func urlProp(xkey, name, pos string) PropertyDraft { return prop(xkey, name, "string", "url", pos) }
-func datetime(xkey, name, pos string) PropertyDraft {
-	return prop(xkey, name, "datetime", "datetime", pos)
-}
-func date(xkey, name, pos string) PropertyDraft { return prop(xkey, name, "datetime", "date", pos) }
-func checkbox(xkey, name, pos string) PropertyDraft {
-	return prop(xkey, name, "boolean", "checkbox", pos)
-}
-func number(xkey, name, pos string) PropertyDraft { return prop(xkey, name, "number", "number", pos) }
 
-func choice(xkey, name, pos string, opts ...opt) PropertyDraft {
-	options := map[string]any{}
-	for i, o := range opts {
-		options[o.key] = map[string]any{"name": o.name, "color": o.color, "pos": lexPos(i)}
+type iconSpec struct {
+	Glyph string `json:"glyph"`
+	Color string `json:"color"`
+}
+
+type propSpec struct {
+	Name      string   `json:"name"`
+	Type      string   `json:"type"`
+	To        []string `json:"to"`
+	Multiple  bool     `json:"multiple"`
+	Index     string   `json:"index"`
+	HideEmpty bool     `json:"hideEmpty"`
+}
+
+type optionSpec struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+type recordSpec struct {
+	Key         string                 `json:"key"`
+	Name        string                 `json:"name"`
+	DisplayName string                 `json:"displayName"`
+	SkipHistory bool                   `json:"skipHistory"`
+	Search      map[string]any         `json:"search"`
+	Fields      []map[string]fieldSpec `json:"fields"`
+}
+
+type fieldSpec struct {
+	Kind     string `json:"kind"`
+	Required bool   `json:"required"`
+}
+
+// propKinds maps a property type (xFormat.type) to its storage kind.
+var propKinds = map[string]string{
+	"text": "string", "longtext": "string", "url": "string",
+	"datetime": "datetime", "date": "datetime", "checkbox": "boolean", "number": "number",
+	"choice": "array", "relation": "array", "member": "array",
+}
+
+var partTemplates = map[string]func(pos string) map[string]any{"body": bodyPart, "chat": chatPart}
+
+// --- loading ---
+
+func mustLoadSchema(src []byte) *schemaFile {
+	s, err := loadSchema(src)
+	if err != nil {
+		panic("schema.cnf: " + err.Error())
 	}
-	return PropertyDraft{XKey: xkey, Name: name, Kind: "array", XFormat: map[string]any{
-		"type": "choice", "pos": pos, "config": map[string]any{"multiple": false}, "options": options}}
+	return s
 }
 
-func relation(xkey, name, pos string, multiple bool, targets ...string) PropertyDraft {
-	xf := map[string]any{"type": "relation", "pos": pos, "config": map[string]any{"multiple": multiple}}
-	if len(targets) > 0 {
-		xf["relation"] = map[string]any{"targetTypes": targets}
+func loadSchema(src []byte) (*schemaFile, error) {
+	js, err := cnfjson.ToJSON(src, nil)
+	if err != nil {
+		return nil, err
 	}
-	// Relation values are object ids: kept out of the text index (the
-	// link index still reports the edges).
-	return PropertyDraft{XKey: xkey, Name: name, Kind: "array", XFormat: xf, Meta: map[string]any{"index": "none"}}
-}
-
-// member points at space members by identity (`any://u/<identity>`).
-func member(xkey, name, pos string, multiple bool) PropertyDraft {
-	return PropertyDraft{XKey: xkey, Name: name, Kind: "array", XFormat: map[string]any{
-		"type": "member", "pos": pos, "config": map[string]any{"multiple": multiple}},
-		Meta: map[string]any{"index": "none"}}
-}
-
-// indexed puts a property's text into the main search scope (the
-// default scope for properties is FTS-only and never embedded).
-func indexed(p PropertyDraft) PropertyDraft {
-	p.Meta = map[string]any{"index": "basic"}
-	return p
-}
-
-// hideEmpty asks any-ui to show the property row only when it has a value
-// (its vendor key; other clients ignore it).
-func hideEmpty(p PropertyDraft) PropertyDraft {
-	p.XFormat["anyui"] = map[string]any{"headerVisibility": "hideWhenEmpty"}
-	return p
-}
-
-// unindexed keeps a property out of the text index (ids, machine noise).
-func unindexed(p PropertyDraft) PropertyDraft {
-	p.Meta = map[string]any{"index": "none"}
-	return p
-}
-
-// lexPos yields short byte-ordered position keys: a0 … a9, b0 … .
-func lexPos(i int) string {
-	return string(rune('a'+i/10)) + string(rune('0'+i%10))
-}
-
-// bodyPart is the editor module's canonical dataset: the same
-// editor_blocks body a `page` has, so retyping keeps it.
-func bodyPart() map[string]any {
-	return map[string]any{"key": "body", "name": "Body", "pos": "a0",
-		"ui":       map[string]any{"type": "document"},
-		"datasets": []any{map[string]any{"module": "editor"}}}
-}
-
-// chatPart is one transcript per object (the chat module admits only
-// its canonical dataset).
-func chatPart() map[string]any {
-	return map[string]any{"key": "chat", "name": "Chat", "pos": "a1",
-		"ui":       map[string]any{"type": "chat"},
-		"datasets": []any{map[string]any{"module": "chat"}}}
-}
-
-func field(key, kind string, extra map[string]any) map[string]any {
-	f := map[string]any{"key": key, "kind": kind, "mutableBy": "author"}
-	for k, v := range extra {
-		f[k] = v
+	dec := json.NewDecoder(bytes.NewReader(js))
+	dec.DisallowUnknownFields() // a misspelt key is an error, not a silent default
+	var specs []*bundleSpec
+	if err := dec.Decode(&specs); err != nil {
+		return nil, err
 	}
-	return f
+	targets := map[string]bool{}
+	for _, b := range specs {
+		targets[b.XKey] = true
+	}
+	s := &schemaFile{ids: map[string]string{}, collections: map[string]bool{}, optional: map[string]bool{},
+		icons: map[string][2]string{}, bundles: map[string]*bundleSpec{}}
+	for _, b := range specs {
+		if err := b.check(targets); err != nil {
+			return nil, fmt.Errorf("bundle %q: %w", b.Key, err)
+		}
+		if s.bundles[b.Key] != nil {
+			return nil, fmt.Errorf("bundle %q declared twice", b.Key)
+		}
+		s.names = append(s.names, b.Key)
+		s.ids[b.Key] = b.Id
+		if b.Collection {
+			s.collections[b.Key] = true
+		}
+		if b.Optional {
+			s.optional[b.Key] = true
+		}
+		s.icons[b.Key] = [2]string{b.Icon.Glyph, b.Icon.Color}
+		s.bundles[b.Key] = b
+	}
+	if s.bundles["app"] == nil {
+		return nil, errors.New(`no "app" bundle`)
+	}
+	return s, nil
+}
+
+func (b *bundleSpec) check(targets map[string]bool) error {
+	if b.Key == "" || b.Id == "" || b.Name == "" || b.Icon.Glyph == "" {
+		return errors.New("key, id, name and icon are required")
+	}
+	props := map[string]bool{}
+	for _, item := range b.Properties {
+		xkey, p, ok := only(item)
+		if !ok {
+			return errors.New("each properties item is one `xKey: {...}` pair")
+		}
+		if props[xkey] {
+			return fmt.Errorf("property %q declared twice", xkey)
+		}
+		props[xkey] = true
+		if err := p.check(len(b.Choices[xkey]) > 0, targets); err != nil {
+			return fmt.Errorf("property %q: %w", xkey, err)
+		}
+	}
+	for xkey, opts := range b.Choices {
+		if !props[xkey] {
+			return fmt.Errorf("choices.%s: no such property", xkey)
+		}
+		for _, item := range opts {
+			if _, o, ok := only(item); !ok || o.Name == "" || o.Color == "" {
+				return fmt.Errorf("choices.%s: each item is one `key: {name, color}` pair", xkey)
+			}
+		}
+	}
+	for _, p := range b.Parts {
+		if partTemplates[p] == nil {
+			return fmt.Errorf("unknown part %q", p)
+		}
+	}
+	for _, r := range b.Records {
+		if r.Key == "" || r.Name == "" {
+			return errors.New("records need a key and a name")
+		}
+		for _, item := range r.Fields {
+			if _, f, ok := only(item); !ok || f.Kind == "" {
+				return fmt.Errorf("records %q: each field is one `key: {kind}` pair", r.Key)
+			}
+		}
+	}
+	return nil
+}
+
+func (p propSpec) check(hasChoices bool, targets map[string]bool) error {
+	if p.Name == "" {
+		return errors.New("name is required")
+	}
+	if propKinds[p.Type] == "" {
+		return fmt.Errorf("unknown type %q", p.Type)
+	}
+	if p.Type == "choice" && !hasChoices {
+		return errors.New("a choice property needs choices.<xKey>")
+	}
+	if p.Type != "choice" && hasChoices {
+		return errors.New("choices are for a choice property")
+	}
+	if len(p.To) > 0 && p.Type != "relation" {
+		return errors.New("to is for relations")
+	}
+	if p.Multiple && p.Type != "relation" && p.Type != "member" {
+		return errors.New("multiple is for relations and members")
+	}
+	for _, t := range p.To {
+		if !targets[t] {
+			return fmt.Errorf("to %q: no bundle has that xKey", t)
+		}
+	}
+	if p.Index != "" && p.Index != "none" && p.Index != "basic" {
+		return fmt.Errorf("unknown index %q", p.Index)
+	}
+	return nil
+}
+
+// only returns the single entry of a `- key: value` list item.
+func only[V any](m map[string]V) (key string, v V, ok bool) {
+	if len(m) != 1 {
+		return "", v, false
+	}
+	for key, v = range m {
+	}
+	return key, v, true
+}
+
+// --- expansion ---
+
+// bundleDrafts expands schema.cnf into the ensure requests, built fresh
+// per call.
+func bundleDrafts() map[string]*BundleEnsure {
+	out := make(map[string]*BundleEnsure, len(schema.bundles))
+	for name, b := range schema.bundles {
+		out[name] = b.expand()
+	}
+	return out
+}
+
+func (b *bundleSpec) expand() *BundleEnsure {
+	e := &BundleEnsure{Id: b.Id, Name: b.Name, XKey: b.XKey, Layout: b.Layout, Hidden: b.Hidden,
+		Collection: b.Collection, RootCollections: b.RootCollections, RootProperties: b.RootProperties}
+	for i, item := range b.Properties {
+		xkey, p, _ := only(item)
+		e.Properties = append(e.Properties, p.expand(xkey, lexPos(i), b.Choices[xkey]))
+	}
+	for i, p := range b.Parts {
+		e.Parts = append(e.Parts, partTemplates[p](lexPos(i)))
+	}
+	for i, r := range b.Records {
+		e.Parts = append(e.Parts, r.expand(lexPos(len(b.Parts)+i)))
+	}
+	return e
+}
+
+func (p propSpec) expand(xkey, pos string, choices []map[string]optionSpec) PropertyDraft {
+	xf := map[string]any{"type": p.Type, "pos": pos}
+	d := PropertyDraft{XKey: xkey, Name: p.Name, Kind: propKinds[p.Type], XFormat: xf}
+	switch p.Type {
+	case "choice":
+		options := map[string]any{}
+		for i, item := range choices {
+			key, o, _ := only(item)
+			options[key] = map[string]any{"name": o.Name, "color": o.Color, "pos": lexPos(i)}
+		}
+		xf["config"], xf["options"] = map[string]any{"multiple": false}, options
+	case "relation", "member":
+		xf["config"] = map[string]any{"multiple": p.Multiple}
+		if len(p.To) > 0 {
+			xf["relation"] = map[string]any{"targetTypes": p.To}
+		}
+		// Object ids and identities stay out of the text index (the
+		// link index still reports relation edges).
+		d.Meta = map[string]any{"index": "none"}
+	}
+	if p.Index != "" {
+		d.Meta = map[string]any{"index": p.Index}
+	}
+	if p.HideEmpty {
+		xf["anyui"] = map[string]any{"headerVisibility": "hideWhenEmpty"}
+	}
+	return d
+}
+
+func (r recordSpec) expand(pos string) map[string]any {
+	var fields []any
+	for _, item := range r.Fields {
+		key, f, _ := only(item)
+		fd := map[string]any{"key": key, "kind": f.Kind, "mutableBy": "author"}
+		if f.Required {
+			fd["required"] = true
+		}
+		fields = append(fields, fd)
+	}
+	fields = append(fields, stamp("author", "creator"), stamp("createdAt", "createTime"), stamp("updatedAt", "modifyTime"))
+	ds := map[string]any{"key": r.Key, "idRule": "user", "deleteBy": "author", "displayName": r.DisplayName, "fields": fields}
+	if r.Search != nil {
+		ds["search"] = r.Search
+	}
+	if r.SkipHistory {
+		ds["skipHistory"] = true
+	}
+	return map[string]any{"key": r.Key, "name": r.Name, "pos": pos,
+		"ui": map[string]any{"type": "table"}, "datasets": []any{ds}}
 }
 
 func stamp(key, kind string) map[string]any {
@@ -166,230 +352,29 @@ func stamp(key, kind string) map[string]any {
 	return f
 }
 
-func recordsPart(key, name, pos string, ds map[string]any) map[string]any {
-	ds["key"] = key
-	ds["idRule"] = "user"
-	ds["deleteBy"] = "author"
-	return map[string]any{"key": key, "name": name, "pos": pos,
-		"ui": map[string]any{"type": "table"}, "datasets": []any{ds}}
+// bodyPart is the editor module's canonical dataset: the same
+// editor_blocks body a `page` has, so retyping keeps it.
+func bodyPart(pos string) map[string]any {
+	return map[string]any{"key": "body", "name": "Body", "pos": pos,
+		"ui":       map[string]any{"type": "document"},
+		"datasets": []any{map[string]any{"module": "editor"}}}
 }
 
-// --- the declarations ---
+// chatPart is one transcript per object (the chat module admits only
+// its canonical dataset).
+func chatPart(pos string) map[string]any {
+	return map[string]any{"key": "chat", "name": "Chat", "pos": pos,
+		"ui":       map[string]any{"type": "chat"},
+		"datasets": []any{map[string]any{"module": "chat"}}}
+}
 
-var activeOptions = []opt{{"active", "Active", "green"}, {"archived", "Archived", "grey"}}
-
-var toolOptions = []opt{{"claude", "Claude Code", "orange"}, {"codex", "Codex", "green"}, {"gemini", "Gemini CLI", "blue"}, {"other", "Other", "grey"}}
-
-func bundleDrafts() map[string]*BundleEnsure {
-	stamps := func() []any {
-		return []any{stamp("author", "creator"), stamp("createdAt", "createTime"), stamp("updatedAt", "modifyTime")}
-	}
-	app := &BundleEnsure{
-		Id: bundleApp, Name: "Agents", XKey: "agents", Hidden: true,
-		RootCollections: []string{"miniapp"},
-		RootProperties:  map[string]any{"miniapp": map[string]any{"bundle": bundleApp, "pos": "y0"}},
-		Parts: []map[string]any{
-			bodyPart(),
-			recordsPart(dsMemories, "Memories", "a1", map[string]any{
-				"displayName": "Agent memories",
-				"search":      map[string]any{"title": "title", "text": "body"},
-				"fields": append([]any{
-					field("title", "string", map[string]any{"required": true}),
-					field("kind", "string", map[string]any{"required": true}),
-					field("scope", "string", map[string]any{"required": true}),
-					field("slug", "string", map[string]any{"required": true}),
-					field("body", "string", nil),
-					field("links", "array", nil),
-					field("origin", "string", nil),
-				}, stamps()...),
-			}),
-			recordsPart(dsConfig, "Config files", "a2", map[string]any{
-				"displayName": "Agent config files",
-				"search":      map[string]any{"text": "body"},
-				"fields": append([]any{
-					field("path", "string", map[string]any{"required": true}),
-					field("tool", "string", nil),
-					field("kind", "string", nil),
-					field("sha256", "string", nil),
-					field("fileId", "string", nil),
-					field("body", "string", nil),
-				}, stamps()...),
-			}),
-			recordsPart(dsStats, "Usage", "a3", map[string]any{
-				"displayName": "Bridge usage per machine and day", "skipHistory": true,
-				"fields": append([]any{
-					field("machine", "string", map[string]any{"required": true}),
-					field("day", "string", map[string]any{"required": true}),
-					field("sessions", "number", nil), field("pulls", "number", nil), field("pushes", "number", nil),
-					field("memSynced", "number", nil), field("conflicts", "number", nil), field("memRejected", "number", nil),
-					field("ragPrompts", "number", nil), field("ragInjected", "number", nil),
-					field("searches", "number", nil), field("errors", "number", nil),
-					field("lastErrors", "array", nil),
-				}, stamps()...),
-			}),
-			recordsPart(dsFeedback, "Feedback", "a4", map[string]any{
-				"displayName": "Agent feedback on memories and the bridge",
-				"search":      map[string]any{"title": "kind", "text": "text"},
-				"fields": append([]any{
-					field("kind", "string", map[string]any{"required": true}),
-					field("text", "string", map[string]any{"required": true}),
-					field("machine", "string", nil),
-					field("ref", "string", nil),
-					field("session", "string", nil),
-				}, stamps()...),
-			}),
-		},
-	}
-	project := &BundleEnsure{
-		Id: bundleProject, Name: "Project", XKey: "agent_project", Collection: true,
-		Properties: []PropertyDraft{
-			unindexed(text("key", "Scope", "a0")),
-			urlProp("repo", "Repository", "a1"),
-			choice("status", "Status", "a2", activeOptions...),
-			number("memories", "Memories", "a3"),
-			datetime("lastActivity", "Last activity", "a4"),
-		},
-	}
-	machine := &BundleEnsure{
-		Id: bundleMachine, Name: "Machine", XKey: "agent_machine", Collection: true,
-		Properties: []PropertyDraft{
-			text("hostname", "Hostname", "a0"),
-			text("os", "OS", "a1"),
-			text("user", "User", "a2"),
-			text("bridgeVersion", "any-agents version", "a3"),
-			text("tools", "Tools", "a4"),
-			datetime("lastSeen", "Last seen", "a5"),
-			choice("status", "Status", "a6", opt{"online", "Online", "green"}, opt{"idle", "Idle", "grey"}),
-		},
-	}
-	session := &BundleEnsure{
-		Id: bundleSession, Name: "Session", XKey: "agent_session", Collection: true,
-		Properties: []PropertyDraft{
-			choice("status", "Status", "a0", opt{"active", "Active", "green"}, opt{"ended", "Ended", "grey"}),
-			choice("tool", "Tool", "a1", toolOptions...),
-			relation("project", "Project", "a2", false, "agent_project"),
-			relation("machine", "Machine", "a3", false, "agent_machine"),
-			member("owner", "Owner", "a4", false),
-			datetime("startedAt", "Started", "a5"),
-			datetime("endedAt", "Ended", "a6"),
-			indexed(longtext("summary", "Summary", "a7")),
-			relation("linear", "Linear issues", "a8", true, "agent_linear_issue"),
-			hideEmpty(urlProp("transcript", "Transcript", "a9")),
-			unindexed(hideEmpty(text("host", "Host", "b0"))),
-			unindexed(hideEmpty(text("toolVersion", "Tool version", "b1"))),
-			unindexed(text("sessionId", "Session id", "b2")),
-			unindexed(hideEmpty(text("cwd", "Working directory", "b3"))),
-			unindexed(hideEmpty(urlProp("sharedTo", "Shared to", "b4"))),
-			unindexed(hideEmpty(urlProp("sharedFrom", "Shared from", "b5"))),
-		},
-	}
-	doc := &BundleEnsure{
-		Id: bundleDoc, Name: "Doc", XKey: "agent_doc", Collection: true,
-		Properties: []PropertyDraft{
-			choice("kind", "Kind", "a0",
-				opt{"note", "Note", "grey"}, opt{"report", "Report", "blue"}, opt{"spec", "Spec", "purple"},
-				opt{"retro", "Retro", "orange"}, opt{"prompt", "Prompt", "yellow"}, opt{"plan", "Plan", "teal"},
-				opt{"other", "Other", "grey"}),
-			relation("project", "Project", "a1", false, "agent_project"),
-			relation("originSession", "Origin session", "a2", false, "agent_session"),
-			relation("sessions", "Sessions", "a3", true, "agent_session"),
-			relation("related", "Related", "a4", true),
-			relation("linear", "Linear", "a5", true, "agent_linear_issue"),
-			member("author", "Author", "a6", false),
-			datetime("date", "Written", "a7"),
-			checkbox("archived", "Archived", "a8"),
-			hideEmpty(urlProp("pr", "PR", "a9")),
-		},
-	}
-	task := &BundleEnsure{
-		Id: bundleTask, Name: "Task", XKey: "agent_task", Collection: true,
-		Properties: []PropertyDraft{
-			choice("status", "Task status", "a0",
-				opt{"todo", "To do", "yellow"}, opt{"in_progress", "In progress", "blue"},
-				opt{"done", "Done", "green"}, opt{"cancelled", "Cancelled", "grey"}),
-			choice("priority", "Priority", "a1",
-				opt{"low", "Low", "grey"}, opt{"normal", "Normal", "blue"}, opt{"high", "High", "red"}),
-			member("assignee", "Assignee", "a2", false),
-			indexed(text("linearKey", "Linear issue", "a3")),
-			relation("target", "Target machine", "a4", false, "agent_machine"),
-			relation("handledBy", "Handled by", "a5", false, "agent_machine"),
-			relation("handledIn", "Handled in", "a6", false, "agent_session"),
-			hideEmpty(date("due", "Due", "a7")),
-		},
-	}
-	plan := &BundleEnsure{
-		Id: bundlePlan, Name: "Plan", XKey: "agent_plan", Collection: true,
-		Properties: []PropertyDraft{
-			choice("status", "Plan status", "a0",
-				opt{"draft", "Draft", "yellow"}, opt{"approved", "Approved", "blue"}, opt{"done", "Done", "green"}),
-			hideEmpty(datetime("approvedAt", "Approved at", "a1")),
-			relation("executedBy", "Executed by", "a2", false, "agent_machine"),
-			relation("executedIn", "Executed in", "a3", true, "agent_session"),
-		},
-	}
-	linear := &BundleEnsure{
-		Id: bundleLinear, Name: "Linear issue", XKey: "agent_linear_issue", Collection: true,
-		Properties: []PropertyDraft{
-			indexed(text("key", "Key", "a0")),
-			choice("status", "Status", "a1",
-				opt{"backlog", "Backlog", "grey"}, opt{"todo", "Todo", "yellow"}, opt{"in_progress", "In progress", "blue"},
-				opt{"in_review", "In review", "purple"}, opt{"done", "Done", "green"}, opt{"canceled", "Canceled", "grey"}),
-			choice("priority", "Priority", "a2",
-				opt{"none", "None", "grey"}, opt{"urgent", "Urgent", "red"}, opt{"high", "High", "orange"},
-				opt{"medium", "Medium", "yellow"}, opt{"low", "Low", "grey"}),
-			text("team", "Team", "a3"),
-			text("assignee", "Assignee", "a4"),
-			urlProp("url", "URL", "a5"),
-			hideEmpty(date("dueDate", "Due", "a6")),
-			unindexed(hideEmpty(text("branch", "Branch", "a7"))),
-			datetime("syncedAt", "Synced", "a8"),
-		},
-	}
-	collab := &BundleEnsure{
-		Id: bundleCollab, Name: "Collab", XKey: "agent_collab", Layout: map[string]any{"type": "page"},
-		Parts: []map[string]any{bodyPart(), chatPart()},
-		Properties: []PropertyDraft{
-			choice("status", "Status", "a0",
-				opt{"request", "Request", "yellow"}, opt{"in_progress", "In progress", "blue"},
-				opt{"done", "Done", "green"}, opt{"canceled", "Canceled", "grey"}),
-			member("requester", "Requester", "a1", false),
-			member("assignees", "Assignees", "a2", true),
-			relation("project", "Project", "a3", false, "agent_project"),
-			relation("linear", "Linear", "a4", true, "agent_linear_issue"),
-			relation("related", "Related", "a5", true),
-			datetime("date", "Opened", "a6"),
-			hideEmpty(datetime("resolvedAt", "Resolved", "a7")),
-			unindexed(hideEmpty(urlProp("originSession", "Origin session", "a8"))),
-			hideEmpty(urlProp("pr", "PR", "a9")),
-			hideEmpty(longtext("doneWhen", "Done when", "a10")),
-			hideEmpty(member("agreed", "Agreed to close", "a11", true)),
-		},
-	}
-	release := &BundleEnsure{
-		Id: bundleRelease, Name: "Release", XKey: "agent_release", Collection: true,
-		Properties: []PropertyDraft{
-			relation("project", "Project", "a0", false, "agent_project"),
-			text("version", "Version", "a1"),
-			date("released", "Released", "a2"),
-			urlProp("url", "Release URL", "a3"),
-			checkbox("breaking", "Breaking", "a4"),
-			checkbox("apiChanges", "API changes", "a5"),
-			relation("includes", "Includes", "a6", true),
-			member("author", "Author", "a7", false),
-		},
-	}
-	return map[string]*BundleEnsure{"app": app, "project": project, "machine": machine, "session": session,
-		"doc": doc, "task": task, "plan": plan, "linear": linear, "collab": collab, "release": release}
+// lexPos yields short byte-ordered position keys: a0 … a9, b0 … .
+func lexPos(i int) string {
+	return string(rune('a'+i/10)) + string(rune('0'+i%10))
 }
 
 // iconOf renders the any-ui icon:v2 value for a lucide glyph.
 func iconOf(glyph, color string) string {
 	return `icon:v2:{"assignment":{"kind":"pack","ref":{"packId":"io.anyproto.lucide","glyphId":"` + glyph +
 		`"}},"color":"` + color + `"}`
-}
-
-var typeIcons = map[string][2]string{
-	"app": {"bot", "purple"}, "project": {"folder-git-2", "blue"}, "machine": {"monitor", "teal"},
-	"session": {"terminal", "grey"}, "doc": {"file-text", "blue"}, "task": {"list-checks", "yellow"},
-	"plan": {"map", "teal"}, "linear": {"circle-dot", "purple"}, "collab": {"messages-square", "orange"}, "release": {"package", "green"},
 }
