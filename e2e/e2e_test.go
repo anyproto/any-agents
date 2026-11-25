@@ -532,7 +532,7 @@ func testInstall(t *testing.T) {
 	}
 }
 
-// expectedProps are the xKeys each bundle declares (schema.go).
+// expectedProps are the xKeys each bundle declares (schema.cnf).
 var expectedProps = map[string][]string{
 	"project": {"key", "repo", "status", "memories", "lastActivity"},
 	"machine": {"hostname", "os", "user", "bridgeVersion", "tools", "lastSeen", "status"},

@@ -1,0 +1,306 @@
+# The any-agents space schema, in the cnf format. schema.go embeds it,
+# checks it and expands it into the bundle ensure requests.
+#
+# Each list element is one client bundle, `<state key>:` and its
+# declaration, in install order. A bundle id is permanent per space: a
+# shape change takes a new /vN id. Two bundles declare a type: app,
+# which hosts the records datasets, and collab, which needs a chat next
+# to its body. The rest declare a collection whose objects are built-in
+# `page`s, so a human creating a row in any client gets the right
+# thing. Descriptors follow any's docs/27-descriptors.md.
+#
+# Bundle keys:
+# - id, name, xKey, icon {glyph, color}: required.
+# - hidden; collection; optional (the bundle may be absent from a
+#   space); layout {type}; miniapp {pos}: files the root in any's
+#   built-in miniapp collection.
+# - properties: one `xKey: {...}` per line; xFormat.pos follows list
+#   order. type sets kind and xFormat.type: text, longtext, url
+#   (string); datetime, date (datetime); checkbox (boolean); number;
+#   choice, relation, member (array). index sets meta.index, "none" or
+#   "basic"; relation and member default to "none". to lists the xKeys
+#   a relation targets. hideEmpty shows the row only when it has a
+#   value (an any-ui vendor key).
+# - choices.<xKey>: a choice property's options, in display order.
+# - parts: "body" (the editor body a page has) and "chat", in order.
+#   A collection has no parts, records or layout.
+# - records: user-keyed, author-deletable table datasets after the
+#   parts, one `<dataset key>:` block each; search {title, text} names
+#   fields. Fields are author-mutable, of kind string, number, boolean,
+#   array, object or datetime; each dataset also gets author, createdAt
+#   and updatedAt stamps.
+
+---
+app:
+    id: "agents/v1"
+    name: "Agents"
+    xKey: "agents"
+    hidden: true
+    icon: {glyph: "bot", color: "purple"}
+    miniapp.pos: "y0"
+    parts: ["body"]
+    records:
+        ---
+        memories:
+            name: "Memories"
+            displayName: "Agent memories"
+            search: {title: "title", text: "body"}
+            fields:
+                - title: {kind: "string", required: true}
+                - kind: {kind: "string", required: true}
+                - scope: {kind: "string", required: true}
+                - slug: {kind: "string", required: true}
+                - body: {kind: "string"}
+                - links: {kind: "array"}
+                - origin: {kind: "string"}
+        ---
+        config:
+            name: "Config files"
+            displayName: "Agent config files"
+            search: {text: "body"}
+            fields:
+                - path: {kind: "string", required: true}
+                - tool: {kind: "string"}
+                - kind: {kind: "string"}
+                - sha256: {kind: "string"}
+                - fileId: {kind: "string"}
+                - body: {kind: "string"}
+        ---
+        stats:
+            name: "Usage"
+            displayName: "Bridge usage per machine and day"
+            skipHistory: true
+            fields:
+                - machine: {kind: "string", required: true}
+                - day: {kind: "string", required: true}
+                - sessions: {kind: "number"}
+                - pulls: {kind: "number"}
+                - pushes: {kind: "number"}
+                - memSynced: {kind: "number"}
+                - conflicts: {kind: "number"}
+                - memRejected: {kind: "number"}
+                - ragPrompts: {kind: "number"}
+                - ragInjected: {kind: "number"}
+                - searches: {kind: "number"}
+                - errors: {kind: "number"}
+                - lastErrors: {kind: "array"}
+        ---
+        feedback:
+            name: "Feedback"
+            displayName: "Agent feedback on memories and the bridge"
+            search: {title: "kind", text: "text"}
+            fields:
+                - kind: {kind: "string", required: true}
+                - text: {kind: "string", required: true}
+                - machine: {kind: "string"}
+                - ref: {kind: "string"}
+                - session: {kind: "string"}
+        ---
+---
+project:
+    id: "agents-project/v1"
+    name: "Project"
+    xKey: "agent_project"
+    collection: true
+    icon: {glyph: "folder-git-2", color: "blue"}
+    properties:
+        - key: {name: "Scope", type: "text", index: "none"}
+        - repo: {name: "Repository", type: "url"}
+        - status: {name: "Status", type: "choice"}
+        - memories: {name: "Memories", type: "number"}
+        - lastActivity: {name: "Last activity", type: "datetime"}
+    choices.status:
+        - active: {name: "Active", color: "green"}
+        - archived: {name: "Archived", color: "grey"}
+---
+machine:
+    id: "agents-machine/v1"
+    name: "Machine"
+    xKey: "agent_machine"
+    collection: true
+    icon: {glyph: "monitor", color: "teal"}
+    properties:
+        - hostname: {name: "Hostname", type: "text"}
+        - os: {name: "OS", type: "text"}
+        - user: {name: "User", type: "text"}
+        - bridgeVersion: {name: "any-agents version", type: "text"}
+        - tools: {name: "Tools", type: "text"}
+        - lastSeen: {name: "Last seen", type: "datetime"}
+        - status: {name: "Status", type: "choice"}
+    choices.status:
+        - online: {name: "Online", color: "green"}
+        - idle: {name: "Idle", color: "grey"}
+---
+session:
+    id: "agents-session/v1"
+    name: "Session"
+    xKey: "agent_session"
+    collection: true
+    icon: {glyph: "terminal", color: "grey"}
+    properties:
+        - status: {name: "Status", type: "choice"}
+        - tool: {name: "Tool", type: "choice"}
+        - project: {name: "Project", type: "relation", to: ["agent_project"]}
+        - machine: {name: "Machine", type: "relation", to: ["agent_machine"]}
+        - owner: {name: "Owner", type: "member"}
+        - startedAt: {name: "Started", type: "datetime"}
+        - endedAt: {name: "Ended", type: "datetime"}
+        - summary: {name: "Summary", type: "longtext", index: "basic"}
+        - linear: {name: "Linear issues", type: "relation", multiple: true, to: ["agent_linear_issue"]}
+        - transcript: {name: "Transcript", type: "url", hideEmpty: true}
+        - host: {name: "Host", type: "text", index: "none", hideEmpty: true}
+        - toolVersion: {name: "Tool version", type: "text", index: "none", hideEmpty: true}
+        - sessionId: {name: "Session id", type: "text", index: "none"}
+        - cwd: {name: "Working directory", type: "text", index: "none", hideEmpty: true}
+        - sharedTo: {name: "Shared to", type: "url", index: "none", hideEmpty: true}
+        - sharedFrom: {name: "Shared from", type: "url", index: "none", hideEmpty: true}
+    choices.status:
+        - active: {name: "Active", color: "green"}
+        - ended: {name: "Ended", color: "grey"}
+    choices.tool:
+        - claude: {name: "Claude Code", color: "orange"}
+        - codex: {name: "Codex", color: "green"}
+        - gemini: {name: "Gemini CLI", color: "blue"}
+        - other: {name: "Other", color: "grey"}
+---
+linear:
+    id: "agents-linear/v1"
+    name: "Linear issue"
+    xKey: "agent_linear_issue"
+    collection: true
+    icon: {glyph: "circle-dot", color: "purple"}
+    properties:
+        - key: {name: "Key", type: "text", index: "basic"}
+        - status: {name: "Status", type: "choice"}
+        - priority: {name: "Priority", type: "choice"}
+        - team: {name: "Team", type: "text"}
+        - assignee: {name: "Assignee", type: "text"}
+        - url: {name: "URL", type: "url"}
+        - dueDate: {name: "Due", type: "date", hideEmpty: true}
+        - branch: {name: "Branch", type: "text", index: "none", hideEmpty: true}
+        - syncedAt: {name: "Synced", type: "datetime"}
+    choices.status:
+        - backlog: {name: "Backlog", color: "grey"}
+        - todo: {name: "Todo", color: "yellow"}
+        - in_progress: {name: "In progress", color: "blue"}
+        - in_review: {name: "In review", color: "purple"}
+        - done: {name: "Done", color: "green"}
+        - canceled: {name: "Canceled", color: "grey"}
+    choices.priority:
+        - none: {name: "None", color: "grey"}
+        - urgent: {name: "Urgent", color: "red"}
+        - high: {name: "High", color: "orange"}
+        - medium: {name: "Medium", color: "yellow"}
+        - low: {name: "Low", color: "grey"}
+---
+release:
+    id: "agents-release/v1"
+    name: "Release"
+    xKey: "agent_release"
+    collection: true
+    icon: {glyph: "package", color: "green"}
+    properties:
+        - project: {name: "Project", type: "relation", to: ["agent_project"]}
+        - version: {name: "Version", type: "text"}
+        - released: {name: "Released", type: "date"}
+        - url: {name: "Release URL", type: "url"}
+        - breaking: {name: "Breaking", type: "checkbox"}
+        - apiChanges: {name: "API changes", type: "checkbox"}
+        - includes: {name: "Includes", type: "relation", multiple: true}
+        - author: {name: "Author", type: "member"}
+---
+doc:
+    id: "agents-doc/v1"
+    name: "Doc"
+    xKey: "agent_doc"
+    collection: true
+    icon: {glyph: "file-text", color: "blue"}
+    properties:
+        - kind: {name: "Kind", type: "choice"}
+        - project: {name: "Project", type: "relation", to: ["agent_project"]}
+        - originSession: {name: "Origin session", type: "relation", to: ["agent_session"]}
+        - sessions: {name: "Sessions", type: "relation", multiple: true, to: ["agent_session"]}
+        - related: {name: "Related", type: "relation", multiple: true}
+        - linear: {name: "Linear", type: "relation", multiple: true, to: ["agent_linear_issue"]}
+        - author: {name: "Author", type: "member"}
+        - date: {name: "Written", type: "datetime"}
+        - archived: {name: "Archived", type: "checkbox"}
+        - pr: {name: "PR", type: "url", hideEmpty: true}
+    choices.kind:
+        - note: {name: "Note", color: "grey"}
+        - report: {name: "Report", color: "blue"}
+        - spec: {name: "Spec", color: "purple"}
+        - retro: {name: "Retro", color: "orange"}
+        - prompt: {name: "Prompt", color: "yellow"}
+        - plan: {name: "Plan", color: "teal"}
+        - other: {name: "Other", color: "grey"}
+---
+task:
+    id: "agents-task/v1"
+    name: "Task"
+    xKey: "agent_task"
+    collection: true
+    icon: {glyph: "list-checks", color: "yellow"}
+    properties:
+        - status: {name: "Task status", type: "choice"}
+        - priority: {name: "Priority", type: "choice"}
+        - assignee: {name: "Assignee", type: "member"}
+        - linearKey: {name: "Linear issue", type: "text", index: "basic"}
+        - target: {name: "Target machine", type: "relation", to: ["agent_machine"]}
+        - handledBy: {name: "Handled by", type: "relation", to: ["agent_machine"]}
+        - handledIn: {name: "Handled in", type: "relation", to: ["agent_session"]}
+        - due: {name: "Due", type: "date", hideEmpty: true}
+    choices.status:
+        - todo: {name: "To do", color: "yellow"}
+        - in_progress: {name: "In progress", color: "blue"}
+        - done: {name: "Done", color: "green"}
+        - cancelled: {name: "Cancelled", color: "grey"}
+    choices.priority:
+        - low: {name: "Low", color: "grey"}
+        - normal: {name: "Normal", color: "blue"}
+        - high: {name: "High", color: "red"}
+---
+plan:
+    id: "agents-plan/v1"
+    name: "Plan"
+    xKey: "agent_plan"
+    collection: true
+    icon: {glyph: "map", color: "teal"}
+    properties:
+        - status: {name: "Plan status", type: "choice"}
+        - approvedAt: {name: "Approved at", type: "datetime", hideEmpty: true}
+        - executedBy: {name: "Executed by", type: "relation", to: ["agent_machine"]}
+        - executedIn: {name: "Executed in", type: "relation", multiple: true, to: ["agent_session"]}
+    choices.status:
+        - draft: {name: "Draft", color: "yellow"}
+        - approved: {name: "Approved", color: "blue"}
+        - done: {name: "Done", color: "green"}
+---
+# Needs a server that lets a client type declare the chat module.
+collab:
+    id: "agents-collab/v1"
+    name: "Collab"
+    xKey: "agent_collab"
+    optional: true
+    layout.type: "page"
+    icon: {glyph: "messages-square", color: "orange"}
+    parts: ["body", "chat"]
+    properties:
+        - status: {name: "Status", type: "choice"}
+        - requester: {name: "Requester", type: "member"}
+        - assignees: {name: "Assignees", type: "member", multiple: true}
+        - project: {name: "Project", type: "relation", to: ["agent_project"]}
+        - linear: {name: "Linear", type: "relation", multiple: true, to: ["agent_linear_issue"]}
+        - related: {name: "Related", type: "relation", multiple: true}
+        - date: {name: "Opened", type: "datetime"}
+        - resolvedAt: {name: "Resolved", type: "datetime", hideEmpty: true}
+        - originSession: {name: "Origin session", type: "url", index: "none", hideEmpty: true}
+        - pr: {name: "PR", type: "url", hideEmpty: true}
+        - doneWhen: {name: "Done when", type: "longtext", hideEmpty: true}
+        - agreed: {name: "Agreed to close", type: "member", multiple: true, hideEmpty: true}
+    choices.status:
+        - request: {name: "Request", color: "yellow"}
+        - in_progress: {name: "In progress", color: "blue"}
+        - done: {name: "Done", color: "green"}
+        - canceled: {name: "Canceled", color: "grey"}
+---
