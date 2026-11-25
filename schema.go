@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
-	"github.com/canonical/go-cnf/cnfjson"
+	"github.com/canonical/go-cnf/cnfembed"
 )
 
-// The space schema lives in schema.cnf; this file loads, checks and
+// The space schema is declared in schema.cnf; this file checks it and
 // expands it into the bundle ensure requests.
 
 const (
@@ -30,22 +32,21 @@ const (
 //go:embed schema.cnf
 var schemaSrc []byte
 
-// schema is schema.cnf, parsed and checked. A bad edit panics at start;
-// TestSchema loads the file, so `go test` reports it first.
-var schema = mustLoadSchema(schemaSrc)
-
 var (
+	// schema is schema.cnf's bundles, in install order. A bad edit
+	// panics at start, which fails every test in this package.
+	schema = mustLoadSchema(schemaSrc)
+
 	// bundleNames are the state keys, in install order.
-	bundleNames = schema.names
-	bundleIds   = schema.ids
+	bundleNames = schema.keys()
+	bundleIds   = schemaIndex(func(b bundleSpec) string { return b.Id })
 	bundleApp   = bundleIds["app"]
-	// collectionBundles declare a collection instead of a type: their
-	// objects are pages filed under them.
-	collectionBundles = schema.collections
-	// optionalBundles may be absent in a space: collab needs a server that
-	// lets a client type declare the chat module.
-	optionalBundles = schema.optional
-	typeIcons       = schema.icons
+	// collectionBundles declare a collection: their objects are pages
+	// filed under it.
+	collectionBundles = schemaIndex(func(b bundleSpec) bool { return b.Collection })
+	// optionalBundles may be absent from a space.
+	optionalBundles = schemaIndex(func(b bundleSpec) bool { return b.Optional })
+	typeIcons       = schemaIndex(func(b bundleSpec) iconSpec { return b.Icon })
 )
 
 var defaultSpaceName = "Agents"
@@ -57,66 +58,44 @@ func spaceName() string {
 	return defaultSpaceName
 }
 
-// --- schema.cnf shape ---
-
-type schemaFile struct {
-	names       []string
-	ids         map[string]string
-	collections map[string]bool
-	optional    map[string]bool
-	icons       map[string][2]string
-	bundles     map[string]*bundleSpec
-}
+// --- schema.cnf, decoded ---
+//
+// schema.cnf's header documents each key. Keys match field names
+// case-insensitively; unknown keys are errors.
 
 type bundleSpec struct {
-	Key             string                             `json:"key"`
-	Id              string                             `json:"id"`
-	Name            string                             `json:"name"`
-	XKey            string                             `json:"xKey"`
-	Hidden          bool                               `json:"hidden"`
-	Collection      bool                               `json:"collection"`
-	Optional        bool                               `json:"optional"`
-	Layout          map[string]any                     `json:"layout"`
-	Icon            iconSpec                           `json:"icon"`
-	RootCollections []string                           `json:"rootCollections"`
-	RootProperties  map[string]any                     `json:"rootProperties"`
-	Parts           []string                           `json:"parts"`
-	Records         []recordSpec                       `json:"records"`
-	Properties      []map[string]propSpec              `json:"properties"`
-	Choices         map[string][]map[string]optionSpec `json:"choices"`
+	Id, Name, XKey               string
+	Hidden, Collection, Optional bool
+	Icon                         iconSpec
+	Miniapp                      *struct{ Pos string }
+	Layout                       *struct{ Type string }
+	Parts                        []string
+	Records                      list[recordSpec]
+	Properties                   list[propSpec]
+	Choices                      map[string]list[optionSpec]
 }
 
-type iconSpec struct {
-	Glyph string `json:"glyph"`
-	Color string `json:"color"`
-}
+type iconSpec struct{ Glyph, Color string }
 
 type propSpec struct {
-	Name      string   `json:"name"`
-	Type      string   `json:"type"`
-	To        []string `json:"to"`
-	Multiple  bool     `json:"multiple"`
-	Index     string   `json:"index"`
-	HideEmpty bool     `json:"hideEmpty"`
+	Name, Type, Index   string
+	To                  []string
+	Multiple, HideEmpty bool
 }
 
-type optionSpec struct {
-	Name  string `json:"name"`
-	Color string `json:"color"`
-}
+type optionSpec struct{ Name, Color string }
 
 type recordSpec struct {
-	Key         string                 `json:"key"`
-	Name        string                 `json:"name"`
-	DisplayName string                 `json:"displayName"`
-	SkipHistory bool                   `json:"skipHistory"`
-	Search      map[string]any         `json:"search"`
-	Fields      []map[string]fieldSpec `json:"fields"`
-}
-
-type fieldSpec struct {
-	Kind     string `json:"kind"`
-	Required bool   `json:"required"`
+	Name, DisplayName string
+	SkipHistory       bool
+	Search            struct {
+		Title string `json:"title,omitempty"`
+		Text  string `json:"text,omitempty"`
+	}
+	Fields list[struct {
+		Kind     string
+		Required bool
+	}]
 }
 
 // propKinds maps a property type (xFormat.type) to its storage kind.
@@ -126,143 +105,132 @@ var propKinds = map[string]string{
 	"choice": "array", "relation": "array", "member": "array",
 }
 
-var partTemplates = map[string]func(pos string) map[string]any{"body": bodyPart, "chat": chatPart}
+var fieldKinds = []string{"string", "number", "boolean", "array", "object", "datetime"}
 
-// --- loading ---
+// moduleParts are the parts a type can declare, each a module's
+// canonical dataset.
+var moduleParts = map[string]struct{ name, ui, module string }{
+	"body": {"Body", "document", "editor"}, // the editor body a page has, so retyping keeps it
+	"chat": {"Chat", "chat", "chat"},       // one transcript per object
+}
 
-func mustLoadSchema(src []byte) *schemaFile {
-	s, err := loadSchema(src)
+// stamps are the fields every records dataset gets: key, stamp.
+var stamps = [][2]string{{"author", "creator"}, {"createdAt", "createTime"}, {"updatedAt", "modifyTime"}}
+
+// list is a cnf list of `key: {...}` items, in order, keys unique.
+type list[T any] []entry[T]
+
+type entry[T any] struct {
+	key string
+	val T
+}
+
+func (l *list[T]) UnmarshalJSON(data []byte) error {
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if len(item) != 1 {
+			return errors.New("each list item is one `key: {...}` pair")
+		}
+		for key, raw := range item {
+			e := entry[T]{key: key}
+			if err := decodeStrict(raw, &e.val); err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+			*l = append(*l, e)
+		}
+	}
+	if d := repeated(l.keys()); d != "" {
+		return fmt.Errorf("%q listed twice", d)
+	}
+	return nil
+}
+
+func (l list[T]) keys() (keys []string) {
+	for _, e := range l {
+		keys = append(keys, e.key)
+	}
+	return keys
+}
+
+// --- loading and checks ---
+
+func mustLoadSchema(src []byte) list[bundleSpec] {
+	bundles, err := loadSchema(src)
 	if err != nil {
 		panic("schema.cnf: " + err.Error())
 	}
-	return s
+	return bundles
 }
 
-func loadSchema(src []byte) (*schemaFile, error) {
-	js, err := cnfjson.ToJSON(src, nil)
+func loadSchema(src []byte) (list[bundleSpec], error) {
+	js, err := cnfembed.ToJSON(src, nil)
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(js))
-	dec.DisallowUnknownFields() // a misspelt key is an error, not a silent default
-	var specs []*bundleSpec
-	if err := dec.Decode(&specs); err != nil {
+	var bundles list[bundleSpec]
+	if err := json.Unmarshal(js, &bundles); err != nil {
 		return nil, err
 	}
-	targets := map[string]bool{}
-	for _, b := range specs {
-		targets[b.XKey] = true
+	var ids, xkeys []string
+	for _, b := range bundles {
+		ids, xkeys = append(ids, b.val.Id), append(xkeys, b.val.XKey)
 	}
-	s := &schemaFile{ids: map[string]string{}, collections: map[string]bool{}, optional: map[string]bool{},
-		icons: map[string][2]string{}, bundles: map[string]*bundleSpec{}}
-	for _, b := range specs {
-		if err := b.check(targets); err != nil {
-			return nil, fmt.Errorf("bundle %q: %w", b.Key, err)
-		}
-		if s.bundles[b.Key] != nil {
-			return nil, fmt.Errorf("bundle %q declared twice", b.Key)
-		}
-		s.names = append(s.names, b.Key)
-		s.ids[b.Key] = b.Id
-		if b.Collection {
-			s.collections[b.Key] = true
-		}
-		if b.Optional {
-			s.optional[b.Key] = true
-		}
-		s.icons[b.Key] = [2]string{b.Icon.Glyph, b.Icon.Color}
-		s.bundles[b.Key] = b
+	var c checker
+	for _, b := range bundles {
+		c.in(b.key, b.val.check(xkeys))
 	}
-	if s.bundles["app"] == nil {
-		return nil, errors.New(`no "app" bundle`)
-	}
-	return s, nil
+	c.need(slices.Contains(bundles.keys(), "app"), `no "app" bundle`)
+	c.none(repeated(ids), "bundle id %q declared twice")
+	c.none(repeated(xkeys), "bundle xKey %q declared twice")
+	return bundles, c.err
 }
 
-func (b *bundleSpec) check(targets map[string]bool) error {
-	if b.Key == "" || b.Id == "" || b.Name == "" || b.Icon.Glyph == "" {
-		return errors.New("key, id, name and icon are required")
-	}
-	props := map[string]bool{}
-	for _, item := range b.Properties {
-		xkey, p, ok := only(item)
-		if !ok {
-			return errors.New("each properties item is one `xKey: {...}` pair")
-		}
-		if props[xkey] {
-			return fmt.Errorf("property %q declared twice", xkey)
-		}
-		props[xkey] = true
-		if err := p.check(len(b.Choices[xkey]) > 0, targets); err != nil {
-			return fmt.Errorf("property %q: %w", xkey, err)
-		}
-	}
-	for xkey, opts := range b.Choices {
-		if !props[xkey] {
-			return fmt.Errorf("choices.%s: no such property", xkey)
-		}
-		for _, item := range opts {
-			if _, o, ok := only(item); !ok || o.Name == "" || o.Color == "" {
-				return fmt.Errorf("choices.%s: each item is one `key: {name, color}` pair", xkey)
-			}
-		}
-	}
-	for _, p := range b.Parts {
-		if partTemplates[p] == nil {
-			return fmt.Errorf("unknown part %q", p)
-		}
+func (b bundleSpec) check(xkeys []string) error {
+	var c checker
+	for _, p := range b.Properties {
+		c.in(p.key, p.val.check(b.Choices[p.key], xkeys))
 	}
 	for _, r := range b.Records {
-		if r.Key == "" || r.Name == "" {
-			return errors.New("records need a key and a name")
-		}
-		for _, item := range r.Fields {
-			if _, f, ok := only(item); !ok || f.Kind == "" {
-				return fmt.Errorf("records %q: each field is one `key: {kind}` pair", r.Key)
-			}
-		}
+		c.in(r.key, r.val.check())
 	}
-	return nil
+	parts := append(slices.Clone(b.Parts), b.Records.keys()...)
+	c.need(b.Id != "" && b.Name != "" && b.XKey != "", "id, name and xKey are required")
+	c.need(b.Icon.Glyph != "" && b.Icon.Color != "", "icon needs a glyph and a color")
+	c.need(!b.Collection || len(parts) == 0 && b.Layout == nil, "a collection has no parts, records or layout")
+	c.none(missing(b.Parts, slices.Collect(maps.Keys(moduleParts))), "unknown part %q")
+	c.none(repeated(parts), "part %q declared twice")
+	c.none(missing(slices.Collect(maps.Keys(b.Choices)), b.Properties.keys()), "choices.%s: no such property")
+	return c.err
 }
 
-func (p propSpec) check(hasChoices bool, targets map[string]bool) error {
-	if p.Name == "" {
-		return errors.New("name is required")
+func (p propSpec) check(options list[optionSpec], xkeys []string) error {
+	var c checker
+	c.need(p.Name != "", "name is required")
+	c.need(propKinds[p.Type] != "", "unknown type %q", p.Type)
+	c.need(p.Type != "choice" || len(options) > 0, "a choice property needs choices.<xKey>")
+	c.need(p.Type == "choice" || len(options) == 0, "choices are for a choice property")
+	for _, o := range options {
+		c.need(o.val.Name != "" && o.val.Color != "", "choice %s needs a name and a color", o.key)
 	}
-	if propKinds[p.Type] == "" {
-		return fmt.Errorf("unknown type %q", p.Type)
-	}
-	if p.Type == "choice" && !hasChoices {
-		return errors.New("a choice property needs choices.<xKey>")
-	}
-	if p.Type != "choice" && hasChoices {
-		return errors.New("choices are for a choice property")
-	}
-	if len(p.To) > 0 && p.Type != "relation" {
-		return errors.New("to is for relations")
-	}
-	if p.Multiple && p.Type != "relation" && p.Type != "member" {
-		return errors.New("multiple is for relations and members")
-	}
-	for _, t := range p.To {
-		if !targets[t] {
-			return fmt.Errorf("to %q: no bundle has that xKey", t)
-		}
-	}
-	if p.Index != "" && p.Index != "none" && p.Index != "basic" {
-		return fmt.Errorf("unknown index %q", p.Index)
-	}
-	return nil
+	c.need(p.Type == "relation" || len(p.To) == 0, "to is for relations")
+	c.none(missing(p.To, xkeys), "to %q: no bundle has that xKey")
+	c.need(p.Type == "relation" || p.Type == "member" || !p.Multiple, "multiple is for relations and members")
+	c.need(p.Index == "" || p.Index == "none" || p.Index == "basic", "unknown index %q", p.Index)
+	return c.err
 }
 
-// only returns the single entry of a `- key: value` list item.
-func only[V any](m map[string]V) (key string, v V, ok bool) {
-	if len(m) != 1 {
-		return "", v, false
+func (r recordSpec) check() error {
+	var c checker
+	c.need(r.Name != "", "name is required")
+	for _, f := range r.Fields {
+		c.need(slices.Contains(fieldKinds, f.val.Kind), "%s: unknown kind %q", f.key, f.val.Kind)
+		c.need(!slices.ContainsFunc(stamps, func(s [2]string) bool { return s[0] == f.key }), "%s: every dataset gets that stamp", f.key)
 	}
-	for key, v = range m {
-	}
-	return key, v, true
+	c.none(missing([]string{r.Search.Title, r.Search.Text}, r.Fields.keys()), "search names %q, which is no field")
+	return c.err
 }
 
 // --- expansion ---
@@ -270,48 +238,52 @@ func only[V any](m map[string]V) (key string, v V, ok bool) {
 // bundleDrafts expands schema.cnf into the ensure requests, built fresh
 // per call.
 func bundleDrafts() map[string]*BundleEnsure {
-	out := make(map[string]*BundleEnsure, len(schema.bundles))
-	for name, b := range schema.bundles {
-		out[name] = b.expand()
+	out := map[string]*BundleEnsure{}
+	for _, b := range schema {
+		out[b.key] = b.val.expand()
 	}
 	return out
 }
 
-func (b *bundleSpec) expand() *BundleEnsure {
-	e := &BundleEnsure{Id: b.Id, Name: b.Name, XKey: b.XKey, Layout: b.Layout, Hidden: b.Hidden,
-		Collection: b.Collection, RootCollections: b.RootCollections, RootProperties: b.RootProperties}
-	for i, item := range b.Properties {
-		xkey, p, _ := only(item)
-		e.Properties = append(e.Properties, p.expand(xkey, lexPos(i), b.Choices[xkey]))
+func (b bundleSpec) expand() *BundleEnsure {
+	e := &BundleEnsure{Id: b.Id, Name: b.Name, XKey: b.XKey, Hidden: b.Hidden, Collection: b.Collection}
+	if b.Layout != nil {
+		e.Layout = map[string]any{"type": b.Layout.Type}
 	}
-	for i, p := range b.Parts {
-		e.Parts = append(e.Parts, partTemplates[p](lexPos(i)))
+	if b.Miniapp != nil {
+		e.RootCollections = []string{"miniapp"}
+		e.RootProperties = map[string]any{"miniapp": map[string]any{"bundle": b.Id, "pos": b.Miniapp.Pos}}
+	}
+	for i, p := range b.Properties {
+		e.Properties = append(e.Properties, p.val.expand(p.key, lexPos(i), b.Choices[p.key]))
+	}
+	for i, key := range b.Parts {
+		m := moduleParts[key]
+		e.Parts = append(e.Parts, map[string]any{"key": key, "name": m.name, "pos": lexPos(i),
+			"ui": map[string]any{"type": m.ui}, "datasets": []any{map[string]any{"module": m.module}}})
 	}
 	for i, r := range b.Records {
-		e.Parts = append(e.Parts, r.expand(lexPos(len(b.Parts)+i)))
+		e.Parts = append(e.Parts, r.val.expand(r.key, lexPos(len(b.Parts)+i)))
 	}
 	return e
 }
 
-func (p propSpec) expand(xkey, pos string, choices []map[string]optionSpec) PropertyDraft {
+func (p propSpec) expand(xkey, pos string, choices list[optionSpec]) PropertyDraft {
 	xf := map[string]any{"type": p.Type, "pos": pos}
 	d := PropertyDraft{XKey: xkey, Name: p.Name, Kind: propKinds[p.Type], XFormat: xf}
 	switch p.Type {
 	case "choice":
 		options := map[string]any{}
-		for i, item := range choices {
-			key, o, _ := only(item)
-			options[key] = map[string]any{"name": o.Name, "color": o.Color, "pos": lexPos(i)}
+		for i, o := range choices {
+			options[o.key] = map[string]any{"name": o.val.Name, "color": o.val.Color, "pos": lexPos(i)}
 		}
 		xf["config"], xf["options"] = map[string]any{"multiple": false}, options
 	case "relation", "member":
 		xf["config"] = map[string]any{"multiple": p.Multiple}
 		if len(p.To) > 0 {
-			xf["relation"] = map[string]any{"targetTypes": p.To}
+			xf["relation"] = map[string]any{"targetTypes": slices.Clone(p.To)}
 		}
-		// Object ids and identities stay out of the text index (the
-		// link index still reports relation edges).
-		d.Meta = map[string]any{"index": "none"}
+		d.Meta = map[string]any{"index": "none"} // ids and identities; the link index has the edges
 	}
 	if p.Index != "" {
 		d.Meta = map[string]any{"index": p.Index}
@@ -322,50 +294,82 @@ func (p propSpec) expand(xkey, pos string, choices []map[string]optionSpec) Prop
 	return d
 }
 
-func (r recordSpec) expand(pos string) map[string]any {
+func (r recordSpec) expand(key, pos string) map[string]any {
 	var fields []any
-	for _, item := range r.Fields {
-		key, f, _ := only(item)
-		fd := map[string]any{"key": key, "kind": f.Kind, "mutableBy": "author"}
-		if f.Required {
+	for _, f := range r.Fields {
+		fd := map[string]any{"key": f.key, "kind": f.val.Kind, "mutableBy": "author"}
+		if f.val.Required {
 			fd["required"] = true
 		}
 		fields = append(fields, fd)
 	}
-	fields = append(fields, stamp("author", "creator"), stamp("createdAt", "createTime"), stamp("updatedAt", "modifyTime"))
-	ds := map[string]any{"key": r.Key, "idRule": "user", "deleteBy": "author", "displayName": r.DisplayName, "fields": fields}
-	if r.Search != nil {
+	for _, s := range stamps {
+		fd := map[string]any{"key": s[0], "stamp": s[1]}
+		if s[1] != "creator" {
+			fd["xFormat"] = map[string]any{"type": "datetime"}
+		}
+		fields = append(fields, fd)
+	}
+	ds := map[string]any{"key": key, "idRule": "user", "deleteBy": "author", "displayName": r.DisplayName, "fields": fields}
+	if r.Search.Title != "" || r.Search.Text != "" {
 		ds["search"] = r.Search
 	}
 	if r.SkipHistory {
 		ds["skipHistory"] = true
 	}
-	return map[string]any{"key": r.Key, "name": r.Name, "pos": pos,
-		"ui": map[string]any{"type": "table"}, "datasets": []any{ds}}
+	return map[string]any{"key": key, "name": r.Name, "pos": pos, "ui": map[string]any{"type": "table"}, "datasets": []any{ds}}
 }
 
-func stamp(key, kind string) map[string]any {
-	f := map[string]any{"key": key, "stamp": kind}
-	if kind != "creator" {
-		f["xFormat"] = map[string]any{"type": "datetime"}
+// --- helpers ---
+
+// checker keeps the first failed check.
+type checker struct{ err error }
+
+func (c *checker) need(ok bool, format string, args ...any) {
+	if !ok && c.err == nil {
+		c.err = fmt.Errorf(format, args...)
 	}
-	return f
 }
 
-// bodyPart is the editor module's canonical dataset: the same
-// editor_blocks body a `page` has, so retyping keeps it.
-func bodyPart(pos string) map[string]any {
-	return map[string]any{"key": "body", "name": "Body", "pos": pos,
-		"ui":       map[string]any{"type": "document"},
-		"datasets": []any{map[string]any{"module": "editor"}}}
+// none fails when found is non-empty, naming it.
+func (c *checker) none(found, format string) { c.need(found == "", format, found) }
+
+// in keeps a nested check's error under key.
+func (c *checker) in(key string, err error) { c.need(err == nil, "%s: %w", key, err) }
+
+// repeated returns the first value that occurs twice, or "".
+func repeated(vals []string) string {
+	for i, v := range vals {
+		if slices.Contains(vals[:i], v) {
+			return v
+		}
+	}
+	return ""
 }
 
-// chatPart is one transcript per object (the chat module admits only
-// its canonical dataset).
-func chatPart(pos string) map[string]any {
-	return map[string]any{"key": "chat", "name": "Chat", "pos": pos,
-		"ui":       map[string]any{"type": "chat"},
-		"datasets": []any{map[string]any{"module": "chat"}}}
+// missing returns the first non-empty key absent from have, or "".
+func missing(keys, have []string) string {
+	for _, k := range keys {
+		if k != "" && !slices.Contains(have, k) {
+			return k
+		}
+	}
+	return ""
+}
+
+// decodeStrict decodes JSON, rejecting keys v does not declare.
+func decodeStrict(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
+func schemaIndex[V any](f func(bundleSpec) V) map[string]V {
+	m := map[string]V{}
+	for _, b := range schema {
+		m[b.key] = f(b.val)
+	}
+	return m
 }
 
 // lexPos yields short byte-ordered position keys: a0 … a9, b0 … .
@@ -374,7 +378,7 @@ func lexPos(i int) string {
 }
 
 // iconOf renders the any-ui icon:v2 value for a lucide glyph.
-func iconOf(glyph, color string) string {
-	return `icon:v2:{"assignment":{"kind":"pack","ref":{"packId":"io.anyproto.lucide","glyphId":"` + glyph +
-		`"}},"color":"` + color + `"}`
+func iconOf(icon iconSpec) string {
+	return `icon:v2:{"assignment":{"kind":"pack","ref":{"packId":"io.anyproto.lucide","glyphId":"` + icon.Glyph +
+		`"}},"color":"` + icon.Color + `"}`
 }

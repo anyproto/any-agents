@@ -257,7 +257,7 @@ func ensureBundles(c *Client, sp *Space) (complete bool, err error) {
 		}
 		if installed {
 			icon := typeIcons[name]
-			_ = c.SetProperties(sp.Id, b.RootId, "any", map[string]any{"icon": iconOf(icon[0], icon[1])})
+			_ = c.SetProperties(sp.Id, b.RootId, "any", map[string]any{"icon": iconOf(icon)})
 			if collectionBundles[name] {
 				// Members are plain pages: tell clients what to create.
 				_ = c.PatchCollection(sp.Id, b.RootId, map[string]any{"meta": map[string]any{"defaultType": pageType}})
